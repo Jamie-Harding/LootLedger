@@ -11,21 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install pnpm according to package.json "packageManager"
+      # Install Node (no cache yet — keep it simple)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      # Install pnpm using the version from package.json "packageManager"
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           run_install: false
 
-      # Now Node (enable pnpm cache after pnpm exists)
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: 'pnpm'
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Print versions
+      - name: Show tool versions
         run: |
           node -v
           pnpm -v
