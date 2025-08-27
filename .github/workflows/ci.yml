@@ -11,22 +11,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: 'pnpm'
-
+      # 1) Install pnpm FIRST
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 9.12.2
           run_install: false
 
-      - name: Print tool versions
+      # 2) Then setup Node (now cache: 'pnpm' can run pnpm safely)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Print versions
         run: |
-          echo "PATH=$PATH"
           node -v
-          corepack --version || true
           pnpm -v
 
       - name: Install deps
