@@ -11,14 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Install pnpm FIRST
+      # Install pnpm according to package.json "packageManager"
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9.12.2
           run_install: false
 
-      # 2) Then setup Node (now cache: 'pnpm' can run pnpm safely)
+      # Now Node (enable pnpm cache after pnpm exists)
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
