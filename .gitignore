@@ -5,6 +5,7 @@ dist
 .env
 .env.*
 coverage
+!.env.example
 
 # OS
 .DS_Store
