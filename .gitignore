@@ -1,0 +1,10 @@
+# Node
+node_modules
+.next
+dist
+.env
+.env.*
+coverage
+
+# OS
+.DS_Store
