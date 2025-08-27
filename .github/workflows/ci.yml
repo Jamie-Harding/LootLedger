@@ -16,11 +16,18 @@ jobs:
           node-version: 'lts/*'
           cache: 'pnpm'
 
-      - name: Enable and activate pnpm (corepack)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.2
+          run_install: false
+
+      - name: Print tool versions
         run: |
-          corepack enable
-          corepack prepare pnpm@9.12.2 --activate
-          pnpm --version
+          echo "PATH=$PATH"
+          node -v
+          corepack --version || true
+          pnpm -v
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
