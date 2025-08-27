@@ -8,4 +8,8 @@ export default defineConfig({
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     css: false,
   },
+  esbuild: {
+    jsx: 'automatic',
+    jsxDev: true,
+  },
 })

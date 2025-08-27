@@ -7,9 +7,9 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    "jsx": "react-jsx",
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",
@@ -17,6 +17,7 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+    "types": ["vitest/globals", "node"],
     "plugins": [
       {
         "name": "next"
