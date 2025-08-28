@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from 'electron'
+import path from 'node:path'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
 import { registerDbIpc } from './ipc'
@@ -12,7 +13,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      // preload: add later when you create src/preload.ts
+      preload: path.join(__dirname, 'preload.js'), // built file
     },
   })
 
