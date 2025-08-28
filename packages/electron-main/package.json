@@ -1,0 +1,21 @@
+{
+  "name": "@loot/electron-main",
+  "main": "src/main.ts",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "pnpm run build && pnpm run start",
+    "build": "rimraf dist && tsc -p .",
+    "start": "electron ./dist/main.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "electron": "37.4.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.6.3",
+    "ts-node": "^10.9.2",
+    "cpy": "^12.0.1"
+  }
+}
