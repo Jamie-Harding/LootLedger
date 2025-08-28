@@ -8,13 +8,11 @@ function resolveMigrationsDir(): string {
   if (fs.existsSync(distDir)) return distDir
 
   // 2) During dev (running TS via build+start): packages/electron-main/src/db/migrations
-  // pnpm runs the package scripts with CWD = packages/electron-main
   const devDir = path.resolve(process.cwd(), 'src', 'db', 'migrations')
   if (fs.existsSync(devDir)) return devDir
 
-  // 3) Fallback: sibling to current file (useful if tooling shifts)
-  const fallback = path.join(__dirname, '..', 'src', 'db', 'migrations')
-  return fallback
+  // 3) Fallback
+  return path.join(__dirname, '..', 'src', 'db', 'migrations')
 }
 
 export function runMigrations() {
@@ -38,17 +36,12 @@ export function runMigrations() {
     .filter((f) => /^\d{4}_.+\.sql$/.test(f))
     .sort()
 
-  // Help TS understand the shape of rows returned by .all()
+  // ✅ Type the rows from .all() before mapping
   type MigRow = { id: string }
-  const applied = db
+  const appliedRows = db
     .prepare(`SELECT id FROM _migrations ORDER BY id`)
     .all() as MigRow[]
-  const seen = new Set<string>(
-    db
-      .prepare(`SELECT id FROM _migrations ORDER BY id`)
-      .all()
-      .map((r: { id: string }) => r.id),
-  )
+  const seen = new Set<string>(appliedRows.map((r) => r.id))
 
   const apply = db.prepare(
     `INSERT INTO _migrations (id, applied_at) VALUES (?, ?)`,

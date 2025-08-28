@@ -1,10 +1,10 @@
 {
   "name": "@loot/electron-main",
-  "main": "src/main.ts",
+  "main": "dist/main.js",
   "type": "commonjs",
   "scripts": {
     "dev": "pnpm run build && pnpm run start",
-    "build": "rimraf dist && tsc -p .",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p .",
     "start": "electron ./dist/main.js"
   },
   "dependencies": {
