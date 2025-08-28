@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import path from 'node:path'
+import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
 import { registerDbIpc } from './ipc'
@@ -7,13 +8,20 @@ import { registerDbIpc } from './ipc'
 let win: BrowserWindow | null = null
 
 async function createWindow() {
+  const preloadPath = path.join(__dirname, 'preload.js')
+  console.log(
+    '[main] preload path:',
+    preloadPath,
+    'exists?',
+    fs.existsSync(preloadPath),
+  )
   win = new BrowserWindow({
     width: 1100,
     height: 740,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js'), // built file
+      preload: preloadPath,
     },
   })
 
@@ -26,9 +34,14 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  openDb()
-  runMigrations()
-  registerDbIpc()
+  try {
+    openDb()
+    runMigrations()
+    registerDbIpc()
+  } catch (e) {
+    console.error('[db boot] failed:', e)
+  }
+
   await createWindow()
 
   app.on('activate', async () => {

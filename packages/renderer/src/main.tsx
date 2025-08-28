@@ -12,16 +12,19 @@ declare global {
 
 function App() {
   const [balance, setBalance] = React.useState<number | null>(null)
-  const refresh = async () => setBalance(await window.lootDb.getBalance())
 
-  React.useEffect(() => {
-    refresh()
+  const refreshBalance = React.useCallback(async () => {
+    setBalance(await window.lootDb.getBalance())
   }, [])
 
-  const add = async () => {
+  React.useEffect(() => {
+    refreshBalance()
+  }, [refreshBalance])
+
+  const addTransaction = React.useCallback(async () => {
     await window.lootDb.insertTest(1)
-    await refresh()
-  }
+    await refreshBalance()
+  }, [refreshBalance])
 
   return (
     <div style={{ padding: 16, fontFamily: 'system-ui, sans-serif' }}>
@@ -29,7 +32,10 @@ function App() {
       <p>
         Current balance: <b>{balance ?? '...'}</b>
       </p>
-      <button onClick={add} style={{ padding: '8px 12px', borderRadius: 8 }}>
+      <button
+        onClick={addTransaction}
+        style={{ padding: '8px 12px', borderRadius: 8 }}
+      >
         Insert +1 test transaction
       </button>
       <p style={{ marginTop: 12, opacity: 0.7 }}>
