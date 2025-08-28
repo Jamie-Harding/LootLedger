@@ -3,18 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "dev": "pnpm dev:app",
+    "dev:app": "concurrently -k -n RENDERER,ELECTRON \"pnpm dev:renderer\" \"pnpm dev:electron\"",
+    "dev:renderer": "pnpm --filter @loot/renderer dev",
+    "dev:electron": "pnpm --filter @loot/electron-main dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "husky",
-    "dev": "pnpm dev:app",
-    "dev:app": "concurrently -k -n RENDERER,ELECTRON \"pnpm dev:renderer\" \"pnpm dev:electron\"",
-    "dev:renderer": "pnpm --filter @loot/renderer dev",
-    "dev:electron": "pnpm --filter @loot/electron-main build && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 pnpm --filter @loot/electron-main start"
-
+    "prepare": "husky"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

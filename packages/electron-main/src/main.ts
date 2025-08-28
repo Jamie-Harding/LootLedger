@@ -1,8 +1,6 @@
 import { app, BrowserWindow } from 'electron'
-import path from 'node:path'
-
-import { runMigrations } from './db/migrate'
 import { openDb } from './db'
+import { runMigrations } from './db/migrate'
 import { registerDbIpc } from './ipc'
 
 let win: BrowserWindow | null = null
@@ -12,10 +10,9 @@ async function createWindow() {
     width: 1100,
     height: 740,
     webPreferences: {
-      // point to the built preload at runtime (dist/preload.js after compile)
-      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // preload: add later when you create src/preload.ts
     },
   })
 
@@ -34,9 +31,7 @@ app.whenReady().then(async () => {
   await createWindow()
 
   app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      await createWindow()
-    }
+    if (BrowserWindow.getAllWindows().length === 0) await createWindow()
   })
 })
 
