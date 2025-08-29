@@ -17,9 +17,9 @@ export type AuthStartResult = { url: string; verifier: string; state: string }
 export async function buildAuthUrl(
   redirectUri: string,
 ): Promise<AuthStartResult> {
-  if (!CLIENT_ID || CLIENT_ID === '1987QO8z862eqOITJq') {
+  if (!CLIENT_ID) {
     throw new Error(
-      'CLIENT_ID is not set. Configure TICKTICK_CLIENT_ID env or replace the placeholder.',
+      'CLIENT_ID is not set. Configure TICKTICK_CLIENT_ID env or hardcode it.',
     )
   }
 
