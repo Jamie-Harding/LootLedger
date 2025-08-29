@@ -1,7 +1,6 @@
 // packages/electron-main/src/auth/ticktick.ts
 import crypto from 'node:crypto'
 import { generateVerifier, challengeFromVerifier } from './pkce'
-import fetch from 'node-fetch'
 
 // TODO: confirm these endpoints with TickTick's OAuth docs.
 export const TICKTICK_AUTH = 'https://ticktick.com/oauth/authorize'

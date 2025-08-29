@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "pnpm run build && pnpm run start",
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p . && node -e \"require('fs').mkdirSync('dist/db/migrations',{recursive:true}); try{require('fs').cpSync('src/db/migrations','dist/db/migrations',{recursive:true})}catch{}\"",
-    "start": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron ./dist/main.js"
+    "start": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron ./dist/main.js",
+    "rebuild": "electron-rebuild --force -w better-sqlite3,keytar"
   },
   "dependencies": {
-    "better-sqlite3": "^12.2.0"
+    "better-sqlite3": "^12.2.0",
+    "keytar": "^7.9.0"
   },
   "devDependencies": {
     "@types/node": "^20",
