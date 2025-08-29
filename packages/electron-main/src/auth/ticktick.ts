@@ -62,7 +62,11 @@ export async function exchangeCode({
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!res.ok) throw new Error(`token exchange failed ${res.status}`)
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`token exchange failed ${res.status}: ${text}`)
+  }
   return res.json() as Promise<{
     access_token: string
     refresh_token: string
@@ -80,13 +84,15 @@ export async function refreshToken({
     client_id: CLIENT_ID,
     refresh_token,
   })
-
   const res = await fetch(TICKTICK_TOKEN, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!res.ok) throw new Error(`refresh failed ${res.status}`)
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`refresh failed ${res.status}: ${text}`)
+  }
   return res.json() as Promise<{
     access_token: string
     refresh_token?: string
