@@ -7,3 +7,13 @@ contextBridge.exposeInMainWorld('lootDb', {
   insertTest: (amount?: number) =>
     ipcRenderer.invoke('db:insertTest', amount) as Promise<string>,
 })
+
+contextBridge.exposeInMainWorld('oauth', {
+  start: () => ipcRenderer.invoke('auth:start'),
+  status: () => ipcRenderer.invoke('auth:status'),
+  logout: () => ipcRenderer.invoke('auth:logout'),
+})
+contextBridge.exposeInMainWorld('sync', {
+  now: () => ipcRenderer.invoke('sync:now'),
+  getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+})
