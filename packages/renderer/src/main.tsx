@@ -146,7 +146,9 @@ function App() {
           </button>
           <p style={{ marginTop: 8 }}>
             Last sync:{' '}
-            {lastSync ? new Date(Number(lastSync)).toLocaleString() : '—'}
+            {lastSync && Number(lastSync) > 0
+              ? new Date(Number(lastSync)).toLocaleString()
+              : '—'}
           </p>
         </div>
       </section>
