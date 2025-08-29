@@ -1,42 +1,54 @@
+// auth/index.ts
 import { shell } from 'electron'
 import { startLoopbackServer } from './loopback'
 import { buildAuthUrl, exchangeCode, refreshToken } from './ticktick'
 import { saveTokens, loadTokens, clearTokens } from './keychain'
-import { setState, getState } from '../db/queries'
+import { getState, setState } from '../db/queries'
 
 const ACCOUNT = 'ticktick'
 let inFlight = false
 
-export async function startAuthFlow(db) {
+export async function startAuthFlow(): Promise<void> {
   if (inFlight) return
   inFlight = true
-  try {
-    const { server, port } = await startLoopbackServer(async (code, state) => {
+
+  // Use a const object to satisfy prefer-const while letting us fill values later.
+  const oauth: { verifier?: string; redirectUri?: string } = {}
+
+  const { server, port } = await startLoopbackServer(
+    async (code /*, state? */) => {
       try {
-        const tokens = await exchangeCode({ code, redirectUri, verifier })
-        const expires_at = Date.now() + tokens.expires_in * 1000 - 60 * 1000
+        if (!oauth.verifier || !oauth.redirectUri)
+          throw new Error('OAuth verifier/redirectUri not ready')
+        const tokens = await exchangeCode({
+          code,
+          redirectUri: oauth.redirectUri,
+          verifier: oauth.verifier,
+        })
+        const expires_at = Date.now() + tokens.expires_in * 1000 - 60_000 // refresh 1m early
+
         await saveTokens(ACCOUNT, {
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
           expires_at,
         })
-        await setState(db, 'auth_status', 'signed_in')
+
+        setState('auth_status', 'signed_in')
       } catch (e) {
-        await setState(db, 'auth_status', 'error')
+        setState('auth_status', 'error')
+        throw e
       } finally {
         server.close()
         inFlight = false
       }
-    })
+    },
+  )
 
-    const redirectUri = `http://127.0.0.1:${port}/oauth/callback`
-    const { url, verifier } = await buildAuthUrl(redirectUri)
-    await shell.openExternal(url)
-  } catch (e) {
-    inFlight = false
-    await setState(db, 'auth_status', 'error')
-    throw e
-  }
+  oauth.redirectUri = `http://127.0.0.1:${port}/oauth/callback`
+  const { url, verifier } = await buildAuthUrl(oauth.redirectUri)
+  oauth.verifier = verifier
+
+  await shell.openExternal(url)
 }
 
 export async function getValidAccessToken(): Promise<string | null> {
@@ -44,9 +56,9 @@ export async function getValidAccessToken(): Promise<string | null> {
   if (!t) return null
   if (Date.now() < t.expires_at) return t.access_token
 
-  // refresh
   const r = await refreshToken({ refresh_token: t.refresh_token })
-  const expires_at = Date.now() + r.expires_in * 1000 - 60 * 1000
+  const expires_at = Date.now() + r.expires_in * 1000 - 60_000
+
   const next = {
     access_token: r.access_token,
     refresh_token: r.refresh_token ?? t.refresh_token,
@@ -56,12 +68,13 @@ export async function getValidAccessToken(): Promise<string | null> {
   return next.access_token
 }
 
-export async function logout(db) {
-  await clearTokens(ACCOUNT)
-  await setState(db, 'auth_status', 'signed_out')
+export function logout(): void {
+  clearTokens(ACCOUNT)
+  setState('auth_status', 'signed_out')
 }
 
-export async function authStatus(db) {
-  const s = await getState(db, 'auth_status')
-  return s ?? 'signed_out'
+export function authStatus(): 'signed_in' | 'signed_out' | 'error' {
+  const s = getState('auth_status')
+  if (s === 'signed_in' || s === 'error') return s
+  return 'signed_out'
 }
