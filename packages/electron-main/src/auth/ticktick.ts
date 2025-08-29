@@ -7,10 +7,7 @@ export const TICKTICK_AUTH = 'https://ticktick.com/oauth/authorize'
 export const TICKTICK_TOKEN = 'https://ticktick.com/oauth/token'
 
 // Public client: safe to ship. Prefer env first, fallback to a literal for dev.
-export const CLIENT_ID =
-  process.env.TICKTICK_CLIENT_ID ??
-  process.env.VITE_TICKTICK_CLIENT_ID ??
-  '1987QO8z862eqOITJq' // <-- replace this with your real client_id
+export const CLIENT_ID = process.env.TICKTICK_CLIENT_ID ?? '1987QO8z862eqOITJq'
 
 // Scopes: use whatever TickTick expects, space-separated if multiple.
 export const SCOPE = 'tasks:read tasks:write' // <-- adjust if needed
