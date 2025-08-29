@@ -3,10 +3,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
-import { registerDbIpc } from './ipc'
-import { registerAuthIpc } from './auth/ipc' // <-- add (if you put IPC there)
-import { registerSyncIpc } from './sync/ipc' // <-- add (if you put IPC there)
-import { startScheduler } from './sync' // <-- add
+import { registerDbIpc, registerAuthIpc, registerSyncIpc } from './ipc' // <-- all here
+import { startScheduler } from './sync' // <-- scheduler here
 
 let win: BrowserWindow | null = null
 
