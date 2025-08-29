@@ -1,27 +1,19 @@
-// packages/electron-main/src/auth/ticktick.ts
 import crypto from 'node:crypto'
 import { generateVerifier, challengeFromVerifier } from './pkce'
 
-// TODO: confirm these endpoints with TickTick's OAuth docs.
+// Authz page is on ticktick.com; token API is on api.ticktick.com
 export const TICKTICK_AUTH = 'https://ticktick.com/oauth/authorize'
-export const TICKTICK_TOKEN = 'https://ticktick.com/oauth/token'
+export const TICKTICK_TOKEN = 'https://api.ticktick.com/oauth/token'
 
-// Public client: safe to ship. Prefer env first, fallback to a literal for dev.
 export const CLIENT_ID = process.env.TICKTICK_CLIENT_ID ?? '1987QO8z862eqOITJq'
-
-// Scopes: use whatever TickTick expects, space-separated if multiple.
-export const SCOPE = 'tasks:read tasks:write' // <-- adjust if needed
+export const SCOPE = 'tasks:read tasks:write'
 
 export type AuthStartResult = { url: string; verifier: string; state: string }
 
 export async function buildAuthUrl(
   redirectUri: string,
 ): Promise<AuthStartResult> {
-  if (!CLIENT_ID) {
-    throw new Error(
-      'CLIENT_ID is not set. Configure TICKTICK_CLIENT_ID env or hardcode it.',
-    )
-  }
+  if (!CLIENT_ID) throw new Error('CLIENT_ID is not set')
 
   const verifier = generateVerifier()
   const challenge = await challengeFromVerifier(verifier)
@@ -30,7 +22,7 @@ export async function buildAuthUrl(
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     response_type: 'code',
-    redirect_uri: redirectUri, // e.g., http://127.0.0.1:PORT/oauth/callback
+    redirect_uri: redirectUri, // http://127.0.0.1:8802/oauth/callback
     code_challenge: challenge,
     code_challenge_method: 'S256',
     scope: SCOPE,
@@ -62,7 +54,6 @@ export async function exchangeCode({
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`token exchange failed ${res.status}: ${text}`)
