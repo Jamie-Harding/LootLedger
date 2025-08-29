@@ -3,8 +3,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
-import { registerDbIpc, registerAuthIpc, registerSyncIpc } from './ipc' // <-- all here
-import { startScheduler } from './sync' // <-- scheduler here
+import { registerDbIpc, registerAuthIpc, registerSyncIpc } from './ipc'
+import { startScheduler } from './sync'
 
 let win: BrowserWindow | null = null
 
@@ -36,18 +36,19 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // Try DB boot/migrations, but don’t block IPC if it fails
   try {
     openDb()
     runMigrations()
-    registerDbIpc()
-
-    // ⬇️ M2 wiring: no db arg anymore
-    registerAuthIpc()
-    registerSyncIpc()
-    startScheduler()
   } catch (e) {
     console.error('[db boot] failed:', e)
   }
+
+  // Always register IPC + scheduler (each handler opens DB on demand)
+  registerDbIpc()
+  registerAuthIpc()
+  registerSyncIpc()
+  startScheduler()
 
   await createWindow()
 
