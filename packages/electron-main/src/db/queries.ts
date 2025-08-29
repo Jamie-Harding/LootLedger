@@ -55,3 +55,35 @@ export function setState(key: string, value: string): void {
     `,
   ).run(key, value)
 }
+
+// --- NEW: generic transaction insert used by the Sync worker ---
+export function insertTransaction(
+  amount: number,
+  reason: string,
+  created_at: number = Date.now(),
+  source:
+    | 'task'
+    | 'penalty'
+    | 'challenge'
+    | 'reward'
+    | 'manual'
+    | 'undo' = 'task',
+  metadata: Record<string, unknown> = {},
+): string {
+  const db = openDb()
+  const id = randomUUID()
+  db.prepare(
+    `
+    INSERT INTO transactions (id, created_at, amount, source, reason, metadata, voided)
+    VALUES (@id, @created_at, @amount, @source, @reason, @metadata, 0)
+    `,
+  ).run({
+    id,
+    created_at,
+    amount,
+    source,
+    reason,
+    metadata: JSON.stringify(metadata),
+  })
+  return id
+}
