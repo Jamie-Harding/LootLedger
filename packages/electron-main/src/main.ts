@@ -4,6 +4,9 @@ import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
 import { registerDbIpc } from './ipc'
+import { registerAuthIpc } from './auth/ipc' // <-- add (if you put IPC there)
+import { registerSyncIpc } from './sync/ipc' // <-- add (if you put IPC there)
+import { startScheduler } from './sync' // <-- add
 
 let win: BrowserWindow | null = null
 
@@ -15,6 +18,7 @@ async function createWindow() {
     'exists?',
     fs.existsSync(preloadPath),
   )
+
   win = new BrowserWindow({
     width: 1100,
     height: 740,
@@ -38,6 +42,11 @@ app.whenReady().then(async () => {
     openDb()
     runMigrations()
     registerDbIpc()
+
+    // ⬇️ M2 wiring: no db arg anymore
+    registerAuthIpc()
+    registerSyncIpc()
+    startScheduler()
   } catch (e) {
     console.error('[db boot] failed:', e)
   }
