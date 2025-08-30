@@ -2,34 +2,28 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { getBalance, insertTestTransaction, getState } from './db/queries'
 import { startAuthFlow, authStatus, logout } from './auth'
-import { runOnce, syncEvents } from './sync' // ⬅ import syncEvents
+import { runOnce, syncEvents } from './sync' // ⬅ add syncEvents import
 
-// --- DB (M1) ---
 export function registerDbIpc() {
   ipcMain.handle('db:getBalance', () => getBalance())
-  ipcMain.handle('db:insertTest', (_e, amount: number = 1) =>
-    insertTestTransaction(amount),
+  ipcMain.handle('db:insertTest', (_evt, amount?: number) =>
+    insertTestTransaction(amount ?? 1),
   )
 }
 
-// --- Auth (M2) ---
 export function registerAuthIpc() {
   ipcMain.handle('auth:start', () => startAuthFlow())
   ipcMain.handle('auth:status', () => authStatus())
-  ipcMain.handle('auth:logout', () => {
-    logout()
-    return true
-  })
+  ipcMain.handle('auth:logout', () => logout())
 }
 
-// --- Sync (M2) ---
 export function registerSyncIpc() {
   ipcMain.handle('sync:now', () => runOnce())
   ipcMain.handle('sync:getStatus', () => ({
     lastSyncAt: getState('last_sync_at'),
   }))
 
-  // NEW: push sync status to all windows
+  // ⬇ NEW: push sync status to all windows
   syncEvents.on('status', (payload) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('sync:status', payload)

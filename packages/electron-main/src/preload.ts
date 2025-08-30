@@ -1,36 +1,29 @@
+// preload.ts
 import { contextBridge, ipcRenderer } from 'electron'
 
-console.log('[preload] loaded')
-
 contextBridge.exposeInMainWorld('lootDb', {
-  getBalance: () => ipcRenderer.invoke('db:getBalance') as Promise<number>,
-  insertTest: (amount?: number) =>
-    ipcRenderer.invoke('db:insertTest', amount) as Promise<string>,
-  onStatusChanged(cb: (status: string) => void) {
-    ipcRenderer.on('auth:statusChanged', (_, s) => cb(s))
-  },
+  getBalance: () => ipcRenderer.invoke('db:getBalance'),
+  insertTest: (amount?: number) => ipcRenderer.invoke('db:insertTest', amount),
 })
 
 contextBridge.exposeInMainWorld('oauth', {
   start: () => ipcRenderer.invoke('auth:start'),
   status: () => ipcRenderer.invoke('auth:status'),
   logout: () => ipcRenderer.invoke('auth:logout'),
-})
-contextBridge.exposeInMainWorld('sync', {
-  now: () => ipcRenderer.invoke('sync:now'),
-  getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+  // ⬇ NEW: auth status push
+  onStatusChanged: (cb: (s: 'signed_in' | 'signed_out' | 'error') => void) => {
+    ipcRenderer.on('auth:statusChanged', (_evt, s) => cb(s))
+  },
 })
 
 contextBridge.exposeInMainWorld('sync', {
   now: () => ipcRenderer.invoke('sync:now'),
   getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+  // ⬇ NEW: sync status push
   onStatus: (
-    cb: (p: {
-      ok: boolean
-      at?: number
-      added?: number
-      error?: string
-    }) => void,
+    cb: (
+      p: { ok: true; at: number; added: number } | { ok: false; error: string },
+    ) => void,
   ) => {
     ipcRenderer.on('sync:status', (_evt, payload) => cb(payload))
   },
