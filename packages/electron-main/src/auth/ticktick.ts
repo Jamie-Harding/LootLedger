@@ -1,16 +1,13 @@
+// packages/electron-main/src/auth/ticktick.ts
 import crypto from 'node:crypto'
 import { generateVerifier, challengeFromVerifier } from './pkce'
 
-// UI authorize page
 export const TICKTICK_AUTH = 'https://ticktick.com/oauth/authorize'
 
-// Proxy base URL from env (wrangler gives you workers.dev URL)
+// Read from env (loaded by dotenv in main.ts)
 export const TOKEN_PROXY_URL = process.env.TOKEN_PROXY_URL ?? ''
-
-// Public client_id (safe to ship); MUST match the one configured in the Worker
 export const CLIENT_ID =
   process.env.TICKTICK_CLIENT_ID ?? 'REPLACE_ME_CLIENT_ID'
-
 export const SCOPE = 'tasks:read tasks:write'
 
 export type AuthStartResult = { url: string; verifier: string; state: string }
@@ -51,15 +48,16 @@ export async function exchangeCode({
 
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
-    // client_id is included, but the proxy will override it to ensure consistency
-    client_id: CLIENT_ID,
+    client_id: CLIENT_ID, // proxy overrides to its own ID, but include it
     code,
-    redirect_uri: redirectUri,
+    redirect_uri: redirectUri, // must match 127.0.0.1:8802/oauth/callback
     code_verifier: verifier,
     scope: SCOPE,
   })
 
-  // Accept both "/" and "/oauth/token" on the proxy
+  // tiny debug to confirm we’re calling the proxy
+  console.log('[auth] exchanging via proxy:', `${TOKEN_PROXY_URL}/oauth/token`)
+
   const res = await fetch(`${TOKEN_PROXY_URL}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -85,10 +83,12 @@ export async function refreshToken({
 
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
-    client_id: CLIENT_ID,
+    client_id: CLIENT_ID, // proxy will normalize
     refresh_token,
     scope: SCOPE,
   })
+
+  console.log('[auth] refreshing via proxy:', `${TOKEN_PROXY_URL}/oauth/token`)
 
   const res = await fetch(`${TOKEN_PROXY_URL}/oauth/token`, {
     method: 'POST',
