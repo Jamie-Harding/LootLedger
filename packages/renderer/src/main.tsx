@@ -1,6 +1,26 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 
+type AuthStatus = 'signed_in' | 'signed_out' | 'error'
+
+type SyncOk = { ok: true; at: number; added: number }
+type SyncErr = { ok: false; error: string }
+type SyncStatusPayload = SyncOk | SyncErr
+
+type SyncNowResult = {
+  ok: boolean
+  skipped?: boolean
+  added?: number
+  reason?: string
+  error?: string
+}
+
+type SyncAPI = {
+  now(): Promise<SyncNowResult>
+  getStatus(): Promise<{ lastSyncAt: string | null }>
+  onStatus?(cb: (p: SyncStatusPayload) => void): void
+}
+
 declare global {
   interface Window {
     lootDb: {
@@ -9,21 +29,11 @@ declare global {
     }
     oauth: {
       start(): Promise<void>
-      status(): Promise<'signed_in' | 'signed_out' | 'error'>
+      status(): Promise<AuthStatus>
       logout(): Promise<void>
-      onStatusChanged?(
-        cb: (status: 'signed_in' | 'signed_out' | 'error') => void,
-      ): void
+      onStatusChanged?(cb: (status: AuthStatus) => void): void
     }
-    sync: {
-      now(): Promise<{
-        ok: boolean
-        skipped?: boolean
-        added?: number
-        reason?: string
-      }>
-      getStatus(): Promise<{ lastSyncAt: string | null }>
-    }
+    sync: SyncAPI
   }
 }
 
@@ -32,15 +42,14 @@ function App() {
   const [balance, setBalance] = React.useState<number | null>(null)
 
   // M2 state
-  const [authStatus, setAuthStatus] = React.useState<
-    'signed_in' | 'signed_out' | 'error'
-  >('signed_out')
+  const [authStatus, setAuthStatus] = React.useState<AuthStatus>('signed_out')
   const [lastSync, setLastSync] = React.useState<string | null>(null)
   const [syncBusy, setSyncBusy] = React.useState(false)
 
   // M1 actions
   const refreshBalance = React.useCallback(async () => {
-    setBalance(await window.lootDb.getBalance())
+    const b = await window.lootDb.getBalance()
+    setBalance(b)
   }, [])
 
   const addTransaction = React.useCallback(async () => {
@@ -58,7 +67,7 @@ function App() {
 
   const connectTickTick = React.useCallback(async () => {
     await window.oauth.start()
-    // keep optimistic; server will push a status event on success/error
+    // optimistic; main will push status event on success/error
     await refreshAuthAndSyncStatus()
   }, [refreshAuthAndSyncStatus])
 
@@ -80,17 +89,33 @@ function App() {
 
   // Initial load
   React.useEffect(() => {
-    refreshBalance()
-    refreshAuthAndSyncStatus()
+    void refreshBalance()
+    void refreshAuthAndSyncStatus()
   }, [refreshBalance, refreshAuthAndSyncStatus])
 
-  // ⬇️ subscribe to push updates from main
+  // Subscribe to sync status push from main (updates Last Sync + balance immediately)
   React.useEffect(() => {
-    if (window.oauth.onStatusChanged) {
-      window.oauth.onStatusChanged((s) => {
-        console.log('[renderer] status changed via IPC:', s)
+    if (typeof window.sync.onStatus === 'function') {
+      const handler = (p: SyncStatusPayload) => {
+        // If you want logs, re-enable next line and ensure eslint allows console in dev.
+        // console.log('[renderer] sync status via IPC:', p)
+        if (p.ok && typeof p.at === 'number') {
+          setLastSync(String(p.at))
+          void refreshBalance()
+        }
+      }
+      window.sync.onStatus(handler)
+    }
+  }, [refreshBalance])
+
+  // Subscribe to auth status push from main (updates status immediately)
+  React.useEffect(() => {
+    if (typeof window.oauth.onStatusChanged === 'function') {
+      const handler = (s: AuthStatus) => {
+        // console.log('[renderer] auth status via IPC:', s)
         setAuthStatus(s)
-      })
+      }
+      window.oauth.onStatusChanged(handler)
     }
   }, [])
 
