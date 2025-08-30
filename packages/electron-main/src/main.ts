@@ -1,5 +1,12 @@
-import { app, BrowserWindow } from 'electron'
+import dotenv from 'dotenv'
 import path from 'node:path'
+
+// Load .env.local from the package root (we run from dist/)
+dotenv.config({ path: path.resolve(__dirname, '../.env.local') })
+// Also load .env if someone uses that filename
+dotenv.config()
+
+import { app, BrowserWindow } from 'electron'
 import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
