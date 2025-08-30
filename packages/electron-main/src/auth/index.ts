@@ -37,8 +37,10 @@ export async function startAuthFlow(): Promise<void> {
             expires_at,
           })
           setState('auth_status', 'signed_in')
+          broadcastAuthStatus('signed_in')
         } catch (e) {
           setState('auth_status', 'error')
+          broadcastAuthStatus('error')
           throw e
         } finally {
           server.close()
@@ -82,6 +84,7 @@ export async function getValidAccessToken(): Promise<string | null> {
 export function logout(): void {
   clearTokens(ACCOUNT)
   setState('auth_status', 'signed_out')
+  broadcastAuthStatus('signed_out')
 }
 
 export function authStatus(): 'signed_in' | 'signed_out' | 'error' {
