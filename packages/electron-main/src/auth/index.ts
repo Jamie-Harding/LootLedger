@@ -4,6 +4,7 @@ import { startLoopbackServer } from './loopback'
 import { buildAuthUrl, exchangeCode, refreshToken } from './ticktick'
 import { saveTokens, loadTokens, clearTokens } from './keychain'
 import { getState, setState } from '../db/queries'
+import { BrowserWindow } from 'electron'
 
 const ACCOUNT = 'ticktick'
 const LOOPBACK_PORT = Number(process.env.OAUTH_LOOPBACK_PORT ?? '8802') // must match TickTick redirect
@@ -87,4 +88,10 @@ export function authStatus(): 'signed_in' | 'signed_out' | 'error' {
   const s = getState('auth_status')
   if (s === 'signed_in' || s === 'error') return s
   return 'signed_out'
+}
+
+function broadcastAuthStatus(status: string) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('auth:statusChanged', status)
+  }
 }

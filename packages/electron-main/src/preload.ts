@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('lootDb', {
   getBalance: () => ipcRenderer.invoke('db:getBalance') as Promise<number>,
   insertTest: (amount?: number) =>
     ipcRenderer.invoke('db:insertTest', amount) as Promise<string>,
+  onStatusChanged(cb: (status: string) => void) {
+    ipcRenderer.on('auth:statusChanged', (_, s) => cb(s))
+  },
 })
 
 contextBridge.exposeInMainWorld('oauth', {

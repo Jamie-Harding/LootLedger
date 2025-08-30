@@ -11,6 +11,9 @@ declare global {
       start(): Promise<void>
       status(): Promise<'signed_in' | 'signed_out' | 'error'>
       logout(): Promise<void>
+      onStatusChanged?(
+        cb: (status: 'signed_in' | 'signed_out' | 'error') => void,
+      ): void
     }
     sync: {
       now(): Promise<{
@@ -55,6 +58,7 @@ function App() {
 
   const connectTickTick = React.useCallback(async () => {
     await window.oauth.start()
+    // keep optimistic; server will push a status event on success/error
     await refreshAuthAndSyncStatus()
   }, [refreshAuthAndSyncStatus])
 
@@ -68,16 +72,27 @@ function App() {
     try {
       await window.sync.now()
       await refreshAuthAndSyncStatus()
-      await refreshBalance() // in case sync added transactions
+      await refreshBalance()
     } finally {
       setSyncBusy(false)
     }
   }, [refreshAuthAndSyncStatus, refreshBalance])
 
+  // Initial load
   React.useEffect(() => {
     refreshBalance()
     refreshAuthAndSyncStatus()
   }, [refreshBalance, refreshAuthAndSyncStatus])
+
+  // ⬇️ subscribe to push updates from main
+  React.useEffect(() => {
+    if (window.oauth.onStatusChanged) {
+      window.oauth.onStatusChanged((s) => {
+        console.log('[renderer] status changed via IPC:', s)
+        setAuthStatus(s)
+      })
+    }
+  }, [])
 
   return (
     <div
