@@ -13,7 +13,7 @@
 
 export default {
 	async fetch(req: Request): Promise<Response> {
-		const url = new URL(request.url);
+		const url = new URL(req.url);
 		switch (url.pathname) {
 			case '/message':
 				return new Response('Hello, World!');
