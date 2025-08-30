@@ -1,8 +1,8 @@
 // ipc.ts
-import { ipcMain } from 'electron'
+import { ipcMain, BrowserWindow } from 'electron'
 import { getBalance, insertTestTransaction, getState } from './db/queries'
 import { startAuthFlow, authStatus, logout } from './auth'
-import { runOnce } from './sync'
+import { runOnce, syncEvents } from './sync' // ⬅ import syncEvents
 
 // --- DB (M1) ---
 export function registerDbIpc() {
@@ -28,4 +28,11 @@ export function registerSyncIpc() {
   ipcMain.handle('sync:getStatus', () => ({
     lastSyncAt: getState('last_sync_at'),
   }))
+
+  // NEW: push sync status to all windows
+  syncEvents.on('status', (payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('sync:status', payload)
+    }
+  })
 }

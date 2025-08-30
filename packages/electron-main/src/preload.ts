@@ -20,3 +20,18 @@ contextBridge.exposeInMainWorld('sync', {
   now: () => ipcRenderer.invoke('sync:now'),
   getStatus: () => ipcRenderer.invoke('sync:getStatus'),
 })
+
+contextBridge.exposeInMainWorld('sync', {
+  now: () => ipcRenderer.invoke('sync:now'),
+  getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+  onStatus: (
+    cb: (p: {
+      ok: boolean
+      at?: number
+      added?: number
+      error?: string
+    }) => void,
+  ) => {
+    ipcRenderer.on('sync:status', (_evt, payload) => cb(payload))
+  },
+})
