@@ -5,6 +5,7 @@ import { openDb } from './db'
 import { runMigrations } from './db/migrate'
 import { registerDbIpc, registerAuthIpc, registerSyncIpc } from './ipc'
 import { startScheduler } from './sync'
+import 'dotenv/config'
 
 let win: BrowserWindow | null = null
 
