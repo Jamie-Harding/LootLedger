@@ -139,7 +139,7 @@ export class TickTickClient {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
         // Non-fatal per project; continue others
-         
+
         console.warn('[ticktick] project fetch failed', p.id, msg)
       }
     }
@@ -155,3 +155,50 @@ export class TickTickClient {
     return changes
   }
 }
+
+// --- Adapters expected by sync/index.ts ---------------------------
+import { getValidAccessToken } from '../auth'
+
+type TickTickItemForSync = {
+  id: string
+  title?: string
+  tags?: string[]
+  projectId?: string
+  due?: number | { ts?: number | null } | null
+  completedTime?: number
+  isRecurring?: boolean
+  seriesKey?: string | null
+}
+
+function toSyncItem(x: CompletedItem): TickTickItemForSync {
+  return {
+    id: x.id,
+    title: x.title,
+    tags: x.tags,
+    projectId: x.projectId,
+    due: x.due_ts ?? null,
+    completedTime: x.completed_ts,
+    isRecurring: x.is_recurring,
+    seriesKey: x.series_key,
+  }
+}
+
+export async function listChanges(
+  sinceIso: string,
+): Promise<TickTickItemForSync[]> {
+  const sinceMs = Number.isFinite(Date.parse(sinceIso))
+    ? Date.parse(sinceIso)
+    : 0
+
+  const token = await getValidAccessToken() // likely string | null
+  if (!token) {
+    throw new Error('ticktickClient: no access token (not signed in)')
+  }
+
+  const client = new TickTickClient(token)
+  const changes = await client.listChanges(sinceMs) // CompletedItem[]
+  return changes.map(toSyncItem)
+}
+
+// Alias so sync/index.ts can find either name
+export const listCompletedTasksSince = listChanges

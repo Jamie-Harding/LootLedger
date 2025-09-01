@@ -1,33 +1,47 @@
-import dotenv from 'dotenv'
+// packages/electron-main/src/main.ts
 import path from 'node:path'
+import fs from 'node:fs'
+import { app, BrowserWindow } from 'electron'
 
 // Load .env.local from the package root (we run from dist/)
+import dotenv from 'dotenv'
 dotenv.config({ path: path.resolve(__dirname, '../.env.local') })
-// Also load .env if someone uses that filename
-dotenv.config()
+dotenv.config() // also load .env if present
+import 'dotenv/config'
 
-import { app, BrowserWindow } from 'electron'
-import fs from 'node:fs'
 import { openDb } from './db'
 import { runMigrations } from './db/migrate'
 import { registerDbIpc, registerAuthIpc, registerSyncIpc } from './ipc'
 import { startScheduler } from './sync'
-import 'dotenv/config'
+
+// ---- Hard crash traps so failures are visible in console ----
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandledRejection:', reason)
+})
+
+// Optional: fewer GPU quirks on Windows blank screens
+if (process.platform === 'win32') {
+  app.disableHardwareAcceleration()
+}
 
 let win: BrowserWindow | null = null
 
-async function createWindow() {
+async function createWindow(): Promise<BrowserWindow> {
   const preloadPath = path.join(__dirname, 'preload.js')
   console.log(
-    '[main] preload path:',
+    '[main] creating window, preload:',
     preloadPath,
     'exists?',
     fs.existsSync(preloadPath),
   )
 
-  win = new BrowserWindow({
+  const w = new BrowserWindow({
     width: 1100,
     height: 740,
+    show: false, // show when ready for smoother UX
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -35,36 +49,76 @@ async function createWindow() {
     },
   })
 
-  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
-  await win.loadURL(devUrl)
+  w.once('ready-to-show', () => {
+    console.log('[main] ready-to-show — showing window')
+    w.show()
+  })
 
-  win.on('closed', () => {
+  w.webContents.on('did-finish-load', () => {
+    console.log('[main] did-finish-load')
+    // Uncomment while debugging:
+    // w.webContents.openDevTools({ mode: 'detach' });
+  })
+
+  w.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.error('[main] did-fail-load', { code, desc, url })
+  })
+
+  w.on('closed', () => {
+    console.log('[main] window closed')
     win = null
   })
+
+  const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
+  console.log('[main] loading URL:', devUrl)
+  try {
+    await w.loadURL(devUrl)
+    console.log('[main] loadURL resolved')
+  } catch (err) {
+    console.error('[main] loadURL error:', err)
+  }
+
+  return w
 }
 
 app.whenReady().then(async () => {
+  console.log('[main] app ready')
+
   // Try DB boot/migrations, but don’t block IPC if it fails
   try {
     openDb()
+    try {
+      const db = openDb()
+      const cols = db.prepare('PRAGMA table_info(settings)').all()
+      console.log('[debug] settings columns:', cols)
+    } catch (e) {
+      console.error('[debug] PRAGMA failed:', e)
+    }
     runMigrations()
+    console.log('[db boot] ok')
   } catch (e) {
     console.error('[db boot] failed:', e)
   }
 
-  // Always register IPC + scheduler (each handler opens DB on demand)
+  // Register IPC + start the M4 poller (Rules IPC is hooked inside registerSyncIpc)
+  console.log('[main] registering IPC + scheduler')
   registerDbIpc()
   registerAuthIpc()
   registerSyncIpc()
-  startScheduler()
+  startScheduler() // uses default interval set in sync/index.ts
 
-  await createWindow()
+  console.log('[main] calling createWindow()')
+  win = await createWindow()
 
   app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) await createWindow()
+    console.log('[main] activate')
+    if (BrowserWindow.getAllWindows().length === 0) {
+      win = await createWindow()
+    }
   })
 })
 
+// Standard macOS-ish quit behavior
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })

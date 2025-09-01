@@ -1,96 +1,81 @@
-// at top of ipc.ts (with your other imports)
-import { ipcMain, BrowserWindow } from 'electron'
-import {
-  listRules,
-  upsertRule,
-  deleteRule,
-  getTagPriority,
-  setTagPriority,
-  type UpsertRuleInput,
-  type RuleRow,
-} from './db/queries'
-import * as RulesModule from './sync/rules'
+// packages/electron-main/src/ipc.ts
+import { ipcMain, IpcMainInvokeEvent } from 'electron'
+import * as Queries from './db/queries'
+import * as Auth from './auth'
+import { runOnce, getStatus, getRecentBuffer } from './sync'
+import { registerRulesIpc } from './ipc/rules'
 
-// ----- Types for the tester -----
-type RuleTestContext = {
-  id?: string
-  title: string
-  tags: string[]
-  list?: string
-  projectId?: string
-  completedAt: number // ms since epoch
-  dueAt?: number | null // ms or null
-  weekday: number // 0..6
-  timeOfDayMin: number // minutes from midnight
+// Simple type guard
+function isFn(x: unknown): x is (...args: unknown[]) => unknown {
+  return typeof x === 'function'
 }
 
-type EvalBreakdown = {
-  base: number
-  exclusiveRuleId?: number
-  additiveRuleIds: number[]
-  multiplierRuleIds: number[]
-  subtotalBeforeMult: number
-  productMultiplier: number
-  finalRounded: number
+/* ---------------- DB IPC ---------------- */
+export function registerDbIpc(): void {
+  // Resolve getBalance()
+  const getBalanceFn = (Queries as { getBalance?: () => unknown }).getBalance
+
+  // Resolve insertTest or insertTestTransaction
+  const insertTestFn =
+    (Queries as { insertTest?: (amount?: number) => unknown }).insertTest ??
+    (Queries as { insertTestTransaction?: (amount?: number) => unknown })
+      .insertTestTransaction
+
+  ipcMain.handle('db:getBalance', () => {
+    if (!isFn(getBalanceFn)) {
+      throw new Error('db:getBalance not implemented in db/queries')
+    }
+    return getBalanceFn()
+  })
+
+  ipcMain.handle('db:insertTest', (_e: IpcMainInvokeEvent, amount?: number) => {
+    if (!isFn(insertTestFn)) {
+      throw new Error('db:insertTest not implemented in db/queries')
+    }
+    return insertTestFn(typeof amount === 'number' ? amount : 1)
+  })
 }
 
-// The evaluator signature we expect
-type EvalFn = (
-  ctx: RuleTestContext,
-  rules: RuleRow[],
-  tagOrder: string[],
-) => EvalBreakdown
+/* ---------------- AUTH IPC ---------------- */
+export function registerAuthIpc(): void {
+  // Accept startAuthFlow() or start()
+  const startFn =
+    (Auth as { startAuthFlow?: () => unknown }).startAuthFlow ??
+    (Auth as { start?: () => unknown }).start
 
-// Resolve evaluator regardless of export shape/name
-function resolveEvaluator(mod: typeof RulesModule): EvalFn {
-  const m = mod as unknown as {
-    evaluateTask?: EvalFn
-    evaluate?: EvalFn
-    default?: { evaluateTask?: EvalFn; evaluate?: EvalFn }
-  }
-  if (m.evaluateTask) return m.evaluateTask
-  if (m.evaluate) return m.evaluate
-  if (m.default?.evaluateTask) return m.default.evaluateTask
-  if (m.default?.evaluate) return m.default.evaluate
-  throw new Error(
-    'rules evaluator not found (expected evaluateTask or evaluate)',
-  )
+  // Accept authStatus() or status()
+  const statusFn =
+    (Auth as { authStatus?: () => unknown }).authStatus ??
+    (Auth as { status?: () => unknown }).status
+
+  const logoutFn = (Auth as { logout?: () => unknown }).logout
+
+  ipcMain.handle('auth:start', () => {
+    if (!isFn(startFn))
+      throw new Error('auth:start not implemented in auth/index')
+    return startFn()
+  })
+
+  ipcMain.handle('auth:status', () => {
+    if (!isFn(statusFn))
+      throw new Error('auth:status not implemented in auth/index')
+    return statusFn()
+  })
+
+  ipcMain.handle('auth:logout', () => {
+    if (!isFn(logoutFn))
+      throw new Error('auth:logout not implemented in auth/index')
+    return logoutFn()
+  })
 }
 
-// ---- Rules CRUD ----
-ipcMain.handle('rules:list', () => listRules())
+/* ---------------- SYNC IPC (+ rules wiring) ---------------- */
+export function registerSyncIpc(): void {
+  // Core sync routes used by your preload & renderer
+  ipcMain.handle('sync:now', () => runOnce())
+  ipcMain.handle('sync:getStatus', () => getStatus())
+  ipcMain.handle('sync:getRecent', () => getRecentBuffer())
 
-ipcMain.handle('rules:upsert', (_e, payload: UpsertRuleInput) => {
-  const id = upsertRule(payload)
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('rules:changed', { id })
-  }
-  return { id }
-})
-
-ipcMain.handle('rules:delete', (_e, id: number) => {
-  deleteRule(id)
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('rules:changed', { id, deleted: true })
-  }
-  return { ok: true }
-})
-
-// ---- Tag priority ----
-ipcMain.handle('rules:getTagPriority', () => getTagPriority())
-
-ipcMain.handle('rules:setTagPriority', (_e, tags: string[]) => {
-  setTagPriority(tags)
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('rules:changed', { tagPriority: true })
-  }
-  return { ok: true }
-})
-
-// ---- Rule tester ----
-ipcMain.handle('rules:test', (_e, ctx: RuleTestContext) => {
-  const evalFn = resolveEvaluator(RulesModule)
-  const rules = listRules()
-  const tagOrder = getTagPriority()
-  return evalFn(ctx, rules, tagOrder)
-})
+  // Also register the Rules CRUD + Tester IPC here so main.ts doesn’t need to change
+  registerRulesIpc()
+}
