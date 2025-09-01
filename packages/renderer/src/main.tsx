@@ -17,7 +17,7 @@ type SyncNowResult = {
 
 type SyncAPI = {
   now(): Promise<SyncNowResult>
-  getStatus(): Promise<{ lastSyncAt: string | null }>
+  getStatus(): Promise<{ lastSyncAt: number | null }>
   onStatus?(cb: (p: SyncStatusPayload) => void): void
 }
 
@@ -62,7 +62,7 @@ function App() {
     const s = await window.oauth.status()
     setAuthStatus(s)
     const ss = await window.sync.getStatus()
-    setLastSync(ss.lastSyncAt)
+    setLastSync(ss.lastSyncAt != null ? String(ss.lastSyncAt) : null)
   }, [])
 
   const connectTickTick = React.useCallback(async () => {
@@ -79,7 +79,10 @@ function App() {
   const syncNow = React.useCallback(async () => {
     setSyncBusy(true)
     try {
-      await window.sync.now()
+      const res = await window.sync.now()
+      if (res && res.ok) {
+        // Sync was successful; refresh status will update lastSync
+      }
       await refreshAuthAndSyncStatus()
       await refreshBalance()
     } finally {
@@ -97,8 +100,7 @@ function App() {
   React.useEffect(() => {
     if (typeof window.sync.onStatus === 'function') {
       const handler = (p: SyncStatusPayload) => {
-        // If you want logs, re-enable next line and ensure eslint allows console in dev.
-        // console.log('[renderer] sync status via IPC:', p)
+        console.log('[renderer] sync status via IPC:', p)
         if (p.ok && typeof p.at === 'number') {
           setLastSync(String(p.at))
           void refreshBalance()

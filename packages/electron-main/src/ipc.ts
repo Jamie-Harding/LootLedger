@@ -69,13 +69,21 @@ export function registerAuthIpc(): void {
   })
 }
 
-/* ---------------- SYNC IPC (+ rules wiring) ---------------- */
+/* ---------------- SYNC IPC ( rules wiring) ---------------- */
 export function registerSyncIpc(): void {
   // Core sync routes used by your preload & renderer
-  ipcMain.handle('sync:now', () => runOnce())
+  ipcMain.handle('sync:now', async () => {
+    // run a one-shot tick and return an immediate snapshot so renderer can update
+    await runOnce()
+    return getStatus()
+  })
+
   ipcMain.handle('sync:getStatus', () => getStatus())
   ipcMain.handle('sync:getRecent', () => getRecentBuffer())
 
-  // Also register the Rules CRUD + Tester IPC here so main.ts doesn’t need to change
+  // Also register the Rules CRUD  Tester IPC here so main.ts doesn’t need to change
   registerRulesIpc()
 }
+
+// (No getLastSummary import here — remove any stray imports/handlers
+// that mention it to avoid TS2305/TS1128 errors.)

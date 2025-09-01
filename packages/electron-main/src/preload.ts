@@ -130,7 +130,15 @@ type SyncStatus = {
 }
 
 contextBridge.exposeInMainWorld('sync', {
-  now: () => ipcRenderer.invoke('sync:now'),
+  now: () =>
+    ipcRenderer.invoke('sync:now') as Promise<{
+      lastSyncAt: number | null
+      error: string | null
+      polling: boolean
+      pollSeconds: number
+      backoffMs: number
+      nextRunInMs: number
+    }>,
   getStatus: (): Promise<SyncStatus> => ipcRenderer.invoke('sync:getStatus'),
   getRecent: () => ipcRenderer.invoke('sync:getRecent'),
 

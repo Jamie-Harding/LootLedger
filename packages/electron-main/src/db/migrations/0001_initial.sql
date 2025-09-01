@@ -1,3 +1,5 @@
+-- 0001_initial.sql (rebased baseline)
+
 -- Core “users” (TickTick identity + tokens, last_sync_at)
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,                   -- uuid
@@ -15,7 +17,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,                   -- uuid
   created_at INTEGER NOT NULL,
   amount INTEGER NOT NULL,               -- points (can be negative)
-  source TEXT NOT NULL CHECK (source IN ('task','penalty','challenge','reward','manual','undo')),
+  -- include 'ticktick' for now to match code; you can later change code to 'task' and tighten this
+  source TEXT NOT NULL CHECK (source IN ('task','penalty','challenge','reward','manual','undo','ticktick')),
   reason TEXT,                           -- human text
   metadata TEXT,                         -- JSON string
   related_task_id TEXT,                  -- TickTick task id if relevant
@@ -25,17 +28,17 @@ CREATE TABLE IF NOT EXISTS transactions (
   voided INTEGER NOT NULL DEFAULT 0
 );
 
--- Rules (exclusive/additive/multiplier) + priority
+-- Rules (final shape with match_value)
 CREATE TABLE IF NOT EXISTS rules (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK (type IN ('exclusive','additive','multiplier')),
-  scope TEXT NOT NULL,                   -- JSON: {tags:[], list:..., titleRegex:..., weekday:..., timeRange:..., deadline:...}
-  amount INTEGER,                        -- for exclusive/additive
-  multiplier REAL,                       -- for multiplier
-  priority INTEGER NOT NULL,             -- smaller = higher priority
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  id          INTEGER PRIMARY KEY,
+  priority    INTEGER NOT NULL,
+  type        TEXT NOT NULL CHECK (type IN ('exclusive','additive','multiplier')),
+  scope       TEXT NOT NULL,            -- 'tag' | 'list' | 'title_regex' | 'project' | 'weekday' | 'time_range'
+  match_value TEXT NOT NULL,            -- e.g., '#study' or '^read:.*'
+  amount      REAL NOT NULL DEFAULT 0,  -- points for exclusive/additive; factor for multiplier
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
 );
 
 -- Overrides (one-time / series / all)
@@ -122,12 +125,17 @@ CREATE TABLE IF NOT EXISTS early_bonus_prefs (
   updated_at INTEGER NOT NULL
 );
 
--- App settings (single row)
+-- App settings (normalized key/value)
 CREATE TABLE IF NOT EXISTS settings (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  tag_priority TEXT,                     -- JSON array
-  time_zone TEXT,
-  app_version TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  name TEXT PRIMARY KEY,
+  json TEXT NOT NULL
+);
+
+
+-- Seen set to avoid double-processing the same completion (used by M3/M4)
+CREATE TABLE IF NOT EXISTS seen_completions (
+  task_id       TEXT NOT NULL,
+  completed_ts  INTEGER NOT NULL,
+  seen_at       INTEGER NOT NULL,
+  PRIMARY KEY (task_id, completed_ts)
 );

@@ -2,7 +2,14 @@
 import { BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
 import * as Tick from './ticktickClient'
-import { getState, setState } from '../db/queries'
+// Use namespace import so we can optionally call insert helpers if present
+import * as Q from '../db/queries'
+import {
+  evaluateTask,
+  type Rule as EvalRule,
+  type TaskContext,
+} from '../rewards/evaluator'
+import { randomUUID } from 'node:crypto'
 
 // ---------- Types ----------
 export type RecentCompletion = {
@@ -100,6 +107,12 @@ function emitStatus() {
   syncEvents.emit('status', status)
 }
 
+function emitOneShot(payload: SyncNowResult) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('sync:status', payload)
+  }
+}
+
 function isDueObj(v: unknown): v is { ts?: number | null } {
   return (
     typeof v === 'object' &&
@@ -137,7 +150,7 @@ export function getRecentBuffer(): RecentCompletion[] {
 }
 
 export function getStatus(): SyncStatus {
-  const lastSyncRaw = getState('last_sync_at')
+  const lastSyncRaw = Q.getState('last_sync_at')
   const lastSyncAt = lastSyncRaw ? Number(lastSyncRaw) : null
   const backoff = computeBackoffMs()
   const nextIn = nextPlannedAt
@@ -154,9 +167,50 @@ export function getStatus(): SyncStatus {
   }
 }
 
+// one-shot payload the renderer expects on sync completion/failure
+type SyncNowResult =
+  | { ok: true; at: number; added: number }
+  | { ok: false; error: string }
+
+// ---------- Build evaluator context ----------
+function toTaskContext(it: TickTickItem): TaskContext {
+  const completed = typeof it.completedTime === 'number' ? it.completedTime : 0
+  const d = new Date(completed)
+  const weekday = d.getDay() // 0..6 (Sun=0)
+  const timeOfDayMin = d.getHours() * 60 + d.getMinutes()
+  return {
+    id: it.id,
+    title: it.title ?? '',
+    tags: Array.isArray(it.tags) ? it.tags : [],
+    list: undefined, // (fill if you track lists)
+    projectId: it.projectId,
+    completedAt: completed,
+    dueAt: coerceDueTs(it.due),
+    weekday,
+    timeOfDayMin,
+  }
+}
+
+// ---------- Optional insert bridge (won't throw if missing) ----------
+type InsertArg = {
+  id: string
+  created_at: number
+  amount: number
+  source: string
+  reason: string
+  metadata: string
+  voided?: 0 | 1
+}
+
+const insertTx: ((arg: InsertArg) => unknown) | undefined =
+  (Q as unknown as { insertTransaction?: (arg: InsertArg) => unknown })
+    .insertTransaction ??
+  (Q as unknown as { insertTicktickTransaction?: (arg: InsertArg) => unknown })
+    .insertTicktickTransaction
+
 // ---------- Core: one sync tick ----------
-export async function runOnce(): Promise<void> {
-  const lastSyncRaw = getState('last_sync_at')
+export async function runOnce(): Promise<SyncNowResult> {
+  const lastSyncRaw = Q.getState('last_sync_at')
   const lastSyncMs = lastSyncRaw ? Number(lastSyncRaw) : 0
   const sinceIso = new Date(lastSyncMs || 0).toISOString()
 
@@ -164,7 +218,16 @@ export async function runOnce(): Promise<void> {
     // 1) Pull changed/completed tasks
     const items = await listSince(sinceIso)
 
-    // 2) Filter to truly-new completions using in-memory seen set
+    // 1.5) Load rules + tag order for this tick
+    // (listRules / getTagPriority exist in M4 queries; if not, default)
+    const rules: EvalRule[] =
+      (Q as unknown as { listRules?: () => EvalRule[] }).listRules?.() ?? []
+    const tagOrder: string[] =
+      (
+        Q as unknown as { getTagPriority?: () => string[] }
+      ).getTagPriority?.() ?? []
+
+    // 2) Filter to truly-new completions, evaluate, and (optionally) insert tx
     let newCount = 0
     for (const it of items) {
       const taskId = it.id
@@ -187,6 +250,41 @@ export async function runOnce(): Promise<void> {
         seriesKey: it.seriesKey ?? null,
       }
 
+      // Evaluate with rules
+      try {
+        const ctx = toTaskContext(it)
+        const breakdown = evaluateTask(ctx, rules, tagOrder)
+        const points = breakdown.finalRounded
+
+        // Optional DB insert (only if helper exists)
+        if (insertTx) {
+          const tx: InsertArg = {
+            id: randomUUID(),
+            created_at: rc.completedTs,
+            amount: points,
+            source: 'ticktick',
+            reason: rc.title || 'TickTick completion',
+            metadata: JSON.stringify({
+              taskId: rc.taskId,
+              tags: rc.tags,
+              projectId: rc.projectId,
+              dueTs: rc.dueTs,
+              isRecurring: rc.isRecurring,
+              seriesKey: rc.seriesKey,
+              eval: breakdown,
+            }),
+            voided: 0,
+          }
+          try {
+            insertTx(tx)
+          } catch (e) {
+            console.warn('[sync] insertTransaction failed:', e)
+          }
+        }
+      } catch (e) {
+        console.warn('[sync] evaluation failed for task', rc.taskId, e)
+      }
+
       pushRecent(rc)
       newCount++
     }
@@ -195,16 +293,21 @@ export async function runOnce(): Promise<void> {
 
     // 3) Advance sync cursor on success
     const now = Date.now()
-    setState('last_sync_at', String(now))
+    Q.setState('last_sync_at', String(now))
 
     // 4) Reset failure state, emit status
     consecutiveFailures = 0
     lastError = null
+    // send both: the one-shot (renderer listens for this) and the full snapshot
+    emitOneShot({ ok: true, at: now, added: newCount })
     emitStatus()
+    return { ok: true, at: now, added: newCount }
   } catch (err) {
     consecutiveFailures = Math.min(consecutiveFailures + 1, 8)
     lastError = stringifyError(err)
+    emitOneShot({ ok: false, error: lastError })
     emitStatus()
+    return { ok: false, error: lastError }
   }
 }
 
