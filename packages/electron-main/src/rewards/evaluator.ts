@@ -1,125 +1,180 @@
-export type RuleType = 'exclusive' | 'additive' | 'multiplier'
-
-export interface Rule {
-  id: number
-  priority: number // lower wins for exclusives
-  type: RuleType
-  scope: 'tag' | 'list' | 'title_regex' | 'project' | 'weekday' | 'time_range'
-  matchValue: string // e.g. "#study" or "^read:.*"
-  amount: number // points or factor (for multiplier)
-  enabled: boolean
+// --- NEW / UPDATED TYPES
+export type EvalBreakdown = {
+  pointsPrePenalty: number
+  baseSource: 'override' | 'exclusive' | 'none'
+  exclusiveRuleId?: string
+  additiveRuleIds: string[]
+  multiplierRuleIds: string[]
+  additiveSum: number
+  multiplierProduct: number
 }
 
-export interface TaskContext {
+// Example rule.shape assumption (keep your existing Rule type, this is illustrative)
+type Rule = {
+  id: string
+  enabled: boolean
+  mode: 'exclusive' | 'additive' | 'multiplier'
+  scope:
+    | { kind: 'tag'; value: string }
+    | { kind: 'list'; value: string }
+    | { kind: 'project'; value: string }
+    | { kind: 'title_regex'; value: string }
+    | { kind: 'weekday'; value: number } // 0–6
+    | { kind: 'time_range'; value: { start: string; end: string } } // 'HH:MM'
+    | { kind: 'deadline'; value: DeadlineValue } // NEW
+  amount: number
+}
+
+type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number } // |deadline - completedAt| <= N hours
+
+type TaskCtx = {
   id: string
   title: string
-  tags: string[] // TickTick tags
+  tags: string[]
   list?: string
-  projectId?: string
-  completedAt: number // ms
-  dueAt?: number | null // ms | null (M5 uses this)
-  weekday: number // 0-6, local tz
-  timeOfDayMin: number // minutes from midnight
+  project?: string
+  completedAt: number // epoch ms
+  dueAt?: number // epoch ms (TickTick due date/time if present)
 }
 
-export interface EvalBreakdown {
-  base: number
-  exclusiveRuleId?: number
-  additiveRuleIds: number[]
-  multiplierRuleIds: number[]
-  subtotalBeforeMult: number
-  productMultiplier: number
-  finalRounded: number
-}
-
-/** Select the single exclusive using tag priority, else highest-priority rule id. */
-function pickExclusive(
-  ctx: TaskContext,
-  exclusives: Rule[],
-  tagOrder: string[],
-): Rule | undefined {
-  // If any exclusive is tag-scoped, use tagOrder to break ties.
-  const tagScoped = exclusives.filter(
-    (r) => r.scope === 'tag' && ctx.tags.includes(r.matchValue),
-  )
-  if (tagScoped.length) {
-    const rank = (tag: string) => {
-      const i = tagOrder.indexOf(tag)
-      return i === -1 ? Number.MAX_SAFE_INTEGER : i
-    }
-    // choose exclusive with the *best* (lowest) tag rank; tie-breaker on priority then rule id
-    return tagScoped.sort((a, b) => {
-      const ra = rank(a.matchValue),
-        rb = rank(b.matchValue)
-      if (ra !== rb) return ra - rb
-      if (a.priority !== b.priority) return a.priority - b.priority
-      return a.id - b.id
-    })[0]
-  }
-  // fallback: lowest priority wins among all exclusives that match
-  return exclusives.sort((a, b) => a.priority - b.priority || a.id - b.id)[0]
-}
-
-function matches(ctx: TaskContext, r: Rule): boolean {
-  switch (r.scope) {
-    case 'tag':
-      return ctx.tags.includes(r.matchValue)
-    case 'list':
-      return (ctx.list ?? '') === r.matchValue
-    case 'project':
-      return (ctx.projectId ?? '') === r.matchValue
-    case 'weekday':
-      return String(ctx.weekday) === r.matchValue
-    case 'time_range': {
-      // matchValue like "HH:MM-HH:MM" in local time
-      const [a, b] = r.matchValue.split('-')
-      const toMin = (s: string) => {
-        const [H, M] = s.split(':').map(Number)
-        return H * 60 + (M || 0)
-      }
-      const start = toMin(a),
-        end = toMin(b)
-      const t = ctx.timeOfDayMin
-      return start <= end ? t >= start && t < end : t >= start || t < end // handle overnight
-    }
-    case 'title_regex':
-      return new RegExp(r.matchValue, 'i').test(ctx.title)
+// --- HELPERS (NEW)
+function matchesDeadline(value: DeadlineValue, t: TaskCtx): boolean {
+  if (!t.dueAt) return value === 'has_deadline' ? false : false
+  const diffMs = t.dueAt - t.completedAt
+  switch (typeof value) {
+    case 'string':
+      if (value === 'has_deadline') return !!t.dueAt
+      if (value === 'overdue') return t.dueAt < t.completedAt
+      return false
     default:
+      // object: withinHours
+      if (
+        typeof value.withinHours === 'number' &&
+        Number.isFinite(value.withinHours)
+      ) {
+        const windowMs = Math.abs(value.withinHours) * 3600_000
+        return Math.abs(diffMs) <= windowMs
+      }
       return false
   }
 }
 
+// existing matches() -> add a case for 'deadline'
+function matches(rule: Rule, t: TaskCtx): boolean {
+  if (!rule.enabled) return false
+  const s = rule.scope
+  switch (s.kind) {
+    case 'tag':
+      return t.tags.includes(s.value)
+    case 'list':
+      return t.list === s.value
+    case 'project':
+      return t.project === s.value
+    case 'title_regex': {
+      const rx = new RegExp(s.value, 'i')
+      return rx.test(t.title)
+    }
+    case 'weekday': {
+      const wd = new Date(t.completedAt).getDay()
+      return wd === s.value
+    }
+    case 'time_range': {
+      // interpret time_range against completedAt local time
+      const d = new Date(t.completedAt)
+      const hh = d.getHours()
+      const mm = d.getMinutes()
+      const cur = hh * 60 + mm
+      const [sh, sm] = s.value.start.split(':').map(Number)
+      const [eh, em] = s.value.end.split(':').map(Number)
+      const startMin = sh * 60 + sm
+      const endMin = eh * 60 + em
+      // handle wrap-around ranges like 22:00–02:00
+      return startMin <= endMin
+        ? cur >= startMin && cur <= endMin
+        : cur >= startMin || cur <= endMin
+    }
+    case 'deadline': // NEW
+      return matchesDeadline(s.value, t)
+  }
+}
+
+// --- OPTIONAL: override stub to be filled in M6
+function findOverrideBase(
+  _t: TaskCtx,
+) /* { base?: number; source?: 'override' } */ {
+  return undefined
+}
+
+// --- MAIN EVALUATION (return spec shape)
 export function evaluateTask(
-  ctx: TaskContext,
+  t: TaskCtx,
   rules: Rule[],
   tagPriority: string[],
 ): EvalBreakdown {
-  const enabled = rules.filter((r) => r.enabled && matches(ctx, r))
+  // 1) overrides (stub → none)
+  const override = findOverrideBase(t)
 
-  const exclusives = enabled.filter((r) => r.type === 'exclusive')
-  const additives = enabled.filter((r) => r.type === 'additive')
-  const mults = enabled.filter((r) => r.type === 'multiplier')
+  let baseSource: EvalBreakdown['baseSource'] = 'none'
+  let base = 0
+  let exclusiveRuleId: string | undefined
+  const additiveRuleIds: string[] = []
+  const multiplierRuleIds: string[] = []
 
-  const exclusive = exclusives.length
-    ? pickExclusive(ctx, exclusives, tagPriority)
-    : undefined
-  const base = exclusive ? exclusive.amount : 0
+  if (override) {
+    base = /* override.base */ 0
+    baseSource = 'override'
+  } else {
+    // 2) exclusive by tag priority
+    const exclusives = rules.filter(
+      (r) => r.mode === 'exclusive' && matches(r, t),
+    )
+    if (exclusives.length) {
+      // determine highest priority by tag order (stable tiebreaker)
+      exclusives.sort((a, b) => {
+        const atag = a.scope.kind === 'tag' ? a.scope.value : ''
+        const btag = b.scope.kind === 'tag' ? b.scope.value : ''
+        const ai = tagPriority.indexOf(atag)
+        const bi = tagPriority.indexOf(btag)
+        if (ai === -1 && bi === -1) return 0
+        if (ai === -1) return 1
+        if (bi === -1) return -1
+        return ai - bi
+      })
+      const win = exclusives[0]
+      base = win.amount
+      baseSource = 'exclusive'
+      exclusiveRuleId = win.id
+    }
+  }
 
-  const addSum = additives.reduce((s, r) => s + r.amount, 0)
-  const subtotal = base + addSum
+  // 3) additives
+  let additiveSum = 0
+  for (const r of rules) {
+    if (r.mode !== 'additive') continue
+    if (!matches(r, t)) continue
+    additiveSum += r.amount
+    additiveRuleIds.push(r.id)
+  }
 
-  const product = mults.reduce((p, r) => p * r.amount, 1)
+  // 4) multipliers
+  let multiplierProduct = 1
+  for (const r of rules) {
+    if (r.mode !== 'multiplier') continue
+    if (!matches(r, t)) continue
+    multiplierProduct *= r.amount
+    multiplierRuleIds.push(r.id)
+  }
 
-  // M4 stops here (no penalties/early bonus yet)
-  const final = Math.round(subtotal * product)
+  // 5) round once at the end
+  const pointsPrePenalty = Math.round((base + additiveSum) * multiplierProduct)
 
   return {
-    base,
-    exclusiveRuleId: exclusive?.id,
-    additiveRuleIds: additives.map((r) => r.id),
-    multiplierRuleIds: mults.map((r) => r.id),
-    subtotalBeforeMult: subtotal,
-    productMultiplier: product,
-    finalRounded: final,
+    pointsPrePenalty,
+    baseSource,
+    exclusiveRuleId,
+    additiveRuleIds,
+    multiplierRuleIds,
+    additiveSum,
+    multiplierProduct,
   }
 }
