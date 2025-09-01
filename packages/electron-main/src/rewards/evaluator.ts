@@ -1,4 +1,3 @@
-// --- NEW / UPDATED TYPES
 export type EvalBreakdown = {
   pointsPrePenalty: number
   baseSource: 'override' | 'exclusive' | 'none'
@@ -10,7 +9,8 @@ export type EvalBreakdown = {
 }
 
 // Example rule.shape assumption (keep your existing Rule type, this is illustrative)
-type Rule = {
+
+export type Rule = {
   id: string
   enabled: boolean
   mode: 'exclusive' | 'additive' | 'multiplier'
@@ -25,7 +25,7 @@ type Rule = {
   amount: number
 }
 
-type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number } // |deadline - completedAt| <= N hours
+export type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number } // |deadline - completedAt| <= N hours
 
 type TaskCtx = {
   id: string
@@ -36,6 +36,9 @@ type TaskCtx = {
   completedAt: number // epoch ms
   dueAt?: number // epoch ms (TickTick due date/time if present)
 }
+
+// 👇 export an alias so sync can import TaskContext
+export type TaskContext = TaskCtx
 
 // --- HELPERS (NEW)
 function matchesDeadline(value: DeadlineValue, t: TaskCtx): boolean {
@@ -99,20 +102,18 @@ function matches(rule: Rule, t: TaskCtx): boolean {
 }
 
 // --- OPTIONAL: override stub to be filled in M6
-function findOverrideBase(
-  _t: TaskCtx,
-) /* { base?: number; source?: 'override' } */ {
+function findOverrideBase(): /* { base?: number; source?: 'override' } | */ undefined {
   return undefined
 }
 
 // --- MAIN EVALUATION (return spec shape)
 export function evaluateTask(
-  t: TaskCtx,
+  t: TaskContext,
   rules: Rule[],
   tagPriority: string[],
 ): EvalBreakdown {
   // 1) overrides (stub → none)
-  const override = findOverrideBase(t)
+  const override = findOverrideBase()
 
   let baseSource: EvalBreakdown['baseSource'] = 'none'
   let base = 0

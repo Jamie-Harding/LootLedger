@@ -6,8 +6,9 @@ import * as Tick from './ticktickClient'
 import * as Q from '../db/queries'
 import {
   evaluateTask,
-  type Rule as EvalRule,
+  type Rule,
   type TaskContext,
+  type EvalBreakdown,
 } from '../rewards/evaluator'
 import { randomUUID } from 'node:crypto'
 
@@ -32,14 +33,22 @@ export type SyncStatus = {
   nextRunInMs: number
 }
 
+// TickTick shapes we actually consume during sync
+type TickTickDue =
+  | number // epoch ms
+  | string // ISO-ish
+  | { date?: string } // some APIs return { date: '...' }
+  | null
+  | undefined
+
 // Shape expected from ticktickClient
 type TickTickItem = {
   id: string
   title?: string
   tags?: string[]
   projectId?: string
-  due?: number | { ts?: number | null } | null
-  completedTime?: number
+  due?: TickTickDue
+  completedTime?: number | string
   isRecurring?: boolean
   seriesKey?: string | null
 }
@@ -87,6 +96,21 @@ function key(taskId: string, completedTs: number) {
   return `${taskId}:${completedTs}`
 }
 
+// Narrow unknown/various to a timestamp or undefined
+function coerceDueTs(due: TickTickDue): number | undefined {
+  if (due == null) return undefined
+  if (typeof due === 'number' && Number.isFinite(due)) return due
+  if (typeof due === 'string') {
+    const t = Date.parse(due)
+    return Number.isNaN(t) ? undefined : t
+  }
+  if (typeof due === 'object' && typeof due.date === 'string') {
+    const t = Date.parse(due.date)
+    return Number.isNaN(t) ? undefined : t
+  }
+  return undefined
+}
+
 function pushRecent(item: RecentCompletion) {
   recentBuffer.unshift(item)
   if (recentBuffer.length > RECENT_RING_MAX) recentBuffer.pop()
@@ -119,12 +143,6 @@ function isDueObj(v: unknown): v is { ts?: number | null } {
     v !== null &&
     'ts' in (v as Record<string, unknown>)
   )
-}
-
-function coerceDueTs(due: TickTickItem['due']): number | null {
-  if (typeof due === 'number') return due
-  if (isDueObj(due) && typeof due.ts === 'number') return due.ts
-  return null
 }
 
 function computeBackoffMs(): number {
@@ -174,20 +192,21 @@ type SyncNowResult =
 
 // ---------- Build evaluator context ----------
 function toTaskContext(it: TickTickItem): TaskContext {
-  const completed = typeof it.completedTime === 'number' ? it.completedTime : 0
-  const d = new Date(completed)
-  const weekday = d.getDay() // 0..6 (Sun=0)
-  const timeOfDayMin = d.getHours() * 60 + d.getMinutes()
+  const completedAt =
+    typeof it.completedTime === 'number'
+      ? it.completedTime
+      : typeof it.completedTime === 'string'
+        ? Date.parse(it.completedTime)
+        : Date.now()
+
   return {
     id: it.id,
     title: it.title ?? '',
     tags: Array.isArray(it.tags) ? it.tags : [],
-    list: undefined, // (fill if you track lists)
-    projectId: it.projectId,
-    completedAt: completed,
-    dueAt: coerceDueTs(it.due),
-    weekday,
-    timeOfDayMin,
+    list: undefined,
+    project: it.projectId ?? undefined, // <- no "any"
+    completedAt,
+    dueAt: coerceDueTs(it.due), // <- no "any", never null
   }
 }
 
@@ -220,8 +239,8 @@ export async function runOnce(): Promise<SyncNowResult> {
 
     // 1.5) Load rules + tag order for this tick
     // (listRules / getTagPriority exist in M4 queries; if not, default)
-    const rules: EvalRule[] =
-      (Q as unknown as { listRules?: () => EvalRule[] }).listRules?.() ?? []
+    const rules: Rule[] =
+      (Q as unknown as { listRules?: () => Rule[] }).listRules?.() ?? []
     const tagOrder: string[] =
       (
         Q as unknown as { getTagPriority?: () => string[] }
@@ -254,7 +273,7 @@ export async function runOnce(): Promise<SyncNowResult> {
       try {
         const ctx = toTaskContext(it)
         const breakdown = evaluateTask(ctx, rules, tagOrder)
-        const points = breakdown.finalRounded
+        const points = breakdown.pointsPrePenalty
 
         // Optional DB insert (only if helper exists)
         if (insertTx) {
