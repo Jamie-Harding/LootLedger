@@ -52,21 +52,19 @@ export type RuleTestContext = {
   title: string
   tags: string[]
   list?: string
-  projectId?: string
+  project?: string
   completedAt: number // ms since epoch
   dueAt?: number | null // ms or null
-  weekday: number // 0..6
-  timeOfDayMin: number // minutes from midnight
 }
 
 export type EvalBreakdown = {
-  base: number
-  exclusiveRuleId?: number
-  additiveRuleIds: number[]
-  multiplierRuleIds: number[]
-  subtotalBeforeMult: number
-  productMultiplier: number
-  finalRounded: number
+  pointsPrePenalty: number
+  baseSource: 'override' | 'exclusive' | 'none'
+  exclusiveRuleId?: string
+  additiveRuleIds: string[]
+  multiplierRuleIds: string[]
+  additiveSum: number
+  multiplierProduct: number
 }
 
 export type RulesChangedMessage =

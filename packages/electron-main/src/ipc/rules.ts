@@ -18,26 +18,24 @@ type RuleTestContext = {
   title: string
   tags: string[]
   list?: string
-  projectId?: string
+  project?: string
   completedAt: number // ms since epoch
   dueAt?: number | null // ms or null
-  weekday: number // 0..6
-  timeOfDayMin: number // minutes from midnight
 }
 
 type EvalBreakdown = {
-  base: number
-  exclusiveRuleId?: number
-  additiveRuleIds: number[]
-  multiplierRuleIds: number[]
-  subtotalBeforeMult: number
-  productMultiplier: number
-  finalRounded: number
+  pointsPrePenalty: number
+  baseSource: 'override' | 'exclusive' | 'none'
+  exclusiveRuleId?: string
+  additiveRuleIds: string[]
+  multiplierRuleIds: string[]
+  additiveSum: number
+  multiplierProduct: number
 }
 
 type EvalFn = (
   ctx: RuleTestContext,
-  rules: RuleRow[],
+  rules: ReturnType<typeof ruleRowToDto>[],
   tagOrder: string[],
 ) => EvalBreakdown
 
@@ -175,7 +173,22 @@ export function registerRulesIpc(): void {
       const evalFn = resolveEvaluator(RulesModule)
       const rules = listRules()
       const tagOrder = getTagPriority()
-      return evalFn(ctx, rules, tagOrder)
+
+      // Convert RuleRow[] to Rule[] format expected by evaluator
+      const convertedRules = rules.map(ruleRowToDto)
+
+      // Convert context to match evaluator expectations
+      const convertedCtx = {
+        id: ctx.id || 'test',
+        title: ctx.title,
+        tags: ctx.tags,
+        list: ctx.list,
+        project: ctx.project,
+        completedAt: ctx.completedAt,
+        dueAt: ctx.dueAt,
+      }
+
+      return evalFn(convertedCtx, convertedRules, tagOrder)
     },
   )
 }
