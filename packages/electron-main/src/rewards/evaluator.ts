@@ -1,12 +1,10 @@
-export type EvalBreakdown = {
-  pointsPrePenalty: number
-  baseSource: 'override' | 'exclusive' | 'none'
-  exclusiveRuleId?: string
-  additiveRuleIds: string[]
-  multiplierRuleIds: string[]
-  additiveSum: number
-  multiplierProduct: number
-}
+import type {
+  EvalBreakdown,
+  TaskContext,
+  RuleDTO,
+  DeadlineValue,
+} from './types'
+export type { EvalBreakdown, TaskContext, DeadlineValue } from './types' // keep same exported names
 
 // Example rule.shape assumption (keep your existing Rule type, this is illustrative)
 
@@ -21,27 +19,12 @@ export type Rule = {
     | { kind: 'title_regex'; value: string }
     | { kind: 'weekday'; value: number } // 0–6
     | { kind: 'time_range'; value: { start: string; end: string } } // 'HH:MM'
-    | { kind: 'deadline'; value: DeadlineValue } // NEW
+    | { kind: 'deadline'; value: DeadlineValue }
   amount: number
 }
 
-export type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number } // |deadline - completedAt| <= N hours
-
-type TaskCtx = {
-  id: string
-  title: string
-  tags: string[]
-  list?: string
-  project?: string
-  completedAt: number // epoch ms
-  dueAt?: number // epoch ms (TickTick due date/time if present)
-}
-
-// 👇 export an alias so sync can import TaskContext
-export type TaskContext = TaskCtx
-
 // --- HELPERS (NEW)
-function matchesDeadline(value: DeadlineValue, t: TaskCtx): boolean {
+function matchesDeadline(value: DeadlineValue, t: TaskContext): boolean {
   if (!t.dueAt) return value === 'has_deadline' ? false : false
   const diffMs = t.dueAt - t.completedAt
   switch (typeof value) {
@@ -63,7 +46,7 @@ function matchesDeadline(value: DeadlineValue, t: TaskCtx): boolean {
 }
 
 // existing matches() -> add a case for 'deadline'
-function matches(rule: Rule, t: TaskCtx): boolean {
+function matches(rule: Rule, t: TaskContext): boolean {
   if (!rule.enabled) return false
   const s = rule.scope
   switch (s.kind) {
