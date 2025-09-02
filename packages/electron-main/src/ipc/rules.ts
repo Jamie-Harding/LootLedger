@@ -35,7 +35,7 @@ type EvalBreakdown = {
 
 type EvalFn = (
   ctx: RuleTestContext,
-  rules: ReturnType<typeof ruleRowToDto>[],
+  rules: ReturnType<typeof listRules>,
   tagOrder: string[],
 ) => EvalBreakdown
 
@@ -118,7 +118,7 @@ function ruleRowToDto(row: RuleRow): {
 // Call this from your main ipc bootstrap
 export function registerRulesIpc(): void {
   // CRUD
-  ipcMain.handle('rules:list', () => listRules().map(ruleRowToDto))
+  ipcMain.handle('rules:list', () => listRules())
 
   ipcMain.handle(
     'rules:upsert',
@@ -174,8 +174,8 @@ export function registerRulesIpc(): void {
       const rules = listRules()
       const tagOrder = getTagPriority()
 
-      // Convert RuleRow[] to Rule[] format expected by evaluator
-      const convertedRules = rules.map(ruleRowToDto)
+      // Rules are already in the correct format from listRules()
+      const convertedRules = rules
 
       // Convert context to match evaluator expectations
       const convertedCtx = {
