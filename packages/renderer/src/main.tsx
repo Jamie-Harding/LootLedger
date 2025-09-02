@@ -21,6 +21,38 @@ type RuleDTO = {
 
 type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number }
 
+function formatRuleScope(scope: RuleDTO['scope']): string {
+  switch (scope.kind) {
+    case 'tag':
+      return `tag: ${scope.value}`
+    case 'list':
+      return `list: ${scope.value}`
+    case 'project':
+      return `project: ${scope.value}`
+    case 'title_regex':
+      return `title: ${scope.value}`
+    case 'weekday':
+      const dayNames = [
+        'Sunday',
+        'Monday',
+        'Tuesday',
+        'Wednesday',
+        'Thursday',
+        'Friday',
+        'Saturday',
+      ]
+      return `weekday: ${dayNames[scope.value] || scope.value}`
+    case 'time_range':
+      return `time: ${scope.value.start}-${scope.value.end}`
+    case 'deadline':
+      if (scope.value === 'has_deadline') return 'deadline: has deadline'
+      if (scope.value === 'overdue') return 'deadline: overdue'
+      return `deadline: within ${scope.value.withinHours}h`
+    default:
+      return JSON.stringify(scope)
+  }
+}
+
 type EvalBreakdown = {
   pointsPrePenalty: number
   baseSource: 'override' | 'exclusive' | 'none'
@@ -33,10 +65,15 @@ type EvalBreakdown = {
 
 type RulesAPI = {
   list(): Promise<RuleDTO[]>
-  create(rule: Omit<RuleDTO, 'id'>): Promise<RuleDTO>
-  update(id: string, patch: Partial<Omit<RuleDTO, 'id'>>): Promise<RuleDTO>
-  remove(id: string): Promise<void>
-  reorder(idsInOrder: string[]): Promise<void>
+  create(rule: Omit<RuleDTO, 'id'>): Promise<{ id: number }>
+  update(
+    id: string,
+    patch: Partial<Omit<RuleDTO, 'id'>>,
+  ): Promise<{ id: number }>
+  remove(id: string): Promise<{ ok: true }>
+  reorder(idsInOrder: string[]): Promise<{ ok: true }>
+  getTagPriority(): Promise<string[]>
+  setTagPriority(tags: string[]): Promise<{ ok: true }>
   test(mockTask: unknown): Promise<{
     pointsPrePenalty: number
     baseSource: 'override' | 'exclusive' | 'none'
@@ -46,6 +83,7 @@ type RulesAPI = {
     additiveSum: number
     multiplierProduct: number
   }>
+  onChanged(cb: (msg: unknown) => void): () => void
 }
 
 declare global {
@@ -92,6 +130,8 @@ declare global {
 function RulesPanel() {
   const [rules, setRules] = React.useState<RuleDTO[] | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [quickOpen, setQuickOpen] = React.useState(false)
+  const [quickRx, setQuickRx] = React.useState('')
 
   const refresh = React.useCallback(async () => {
     setRules(await window.rules.list())
@@ -138,19 +178,54 @@ function RulesPanel() {
     }
   }
 
-  const createQuick = async () => {
-    // tiny helper to create a rule quickly for testing
-    const titleRx = prompt('Title regex (e.g. "(?i)gym")')
-    if (!titleRx) return
-    setBusy(true)
-    try {
-      await window.rules.create({
+  // helper: call the right IPC with the right shape
+  async function createAdditiveTitleRegex(rx: string) {
+    // Prefer a native "create" if preload provides it…
+    if (typeof window.rules.create === 'function') {
+      return window.rules.create({
         enabled: true,
         mode: 'additive',
-        scope: { kind: 'title_regex', value: titleRx },
+        scope: { kind: 'title_regex', value: rx },
         amount: 1,
       })
+    }
+
+    // …otherwise fall back to an "upsert" API (old preload) by mapping fields.
+    // This matches the RuleRow/UpsertRulePayload in your preload: scope + matchValue + type + priority.
+    // We pick a high priority to append at the end; adjust later if you sort differently.
+    // @ts-expect-error – only runs when upsert exists
+    if (typeof window.rules.upsert === 'function') {
+      // @ts-expect-error - upsert method may not exist on all versions of the API
+      return window.rules.upsert({
+        id: undefined,
+        enabled: true,
+        type: 'additive',
+        scope: 'title_regex',
+        matchValue: rx,
+        amount: 1,
+        priority: Math.floor(Date.now()),
+      })
+    }
+
+    throw new Error('No rules.create or rules.upsert found on window.rules')
+  }
+
+  const addQuick = async () => {
+    const rx = quickRx.trim()
+    if (!rx) {
+      setQuickOpen(false)
+      return
+    }
+    setBusy(true)
+    try {
+      console.log('[rules] creating quick additive, rx=', rx)
+      await createAdditiveTitleRegex(rx)
+      setQuickRx('')
+      setQuickOpen(false)
       await refresh()
+    } catch (err) {
+      console.error('Failed to create quick rule:', err)
+      alert(String(err))
     } finally {
       setBusy(false)
     }
@@ -160,14 +235,43 @@ function RulesPanel() {
     <section style={{ border: '1px solid #ddd', borderRadius: 8, padding: 12 }}>
       <h2 style={{ marginTop: 0 }}>Rules</h2>
       <div style={{ marginBottom: 8 }}>
-        <button
-          onClick={createQuick}
-          disabled={busy}
-          style={{ padding: '6px 10px', borderRadius: 8 }}
-        >
-          + Quick additive (title_regex)
-        </button>
+        {!quickOpen ? (
+          <button
+            onClick={() => setQuickOpen(true)}
+            disabled={busy}
+            style={{ padding: '6px 10px', borderRadius: 8 }}
+          >
+            + Quick additive (title_regex)
+          </button>
+        ) : (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              autoFocus
+              placeholder="Title regex, e.g. (?i)gym"
+              value={quickRx}
+              onChange={(e) => setQuickRx(e.currentTarget.value)}
+              style={{
+                flex: 1,
+                padding: '6px 8px',
+                borderRadius: 8,
+                border: '1px solid #ccc',
+              }}
+            />
+            <button onClick={addQuick} disabled={busy || !quickRx.trim()}>
+              Add
+            </button>
+            <button
+              onClick={() => {
+                setQuickOpen(false)
+                setQuickRx('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
+
       {!rules ? (
         <p>Loading…</p>
       ) : (
@@ -187,7 +291,7 @@ function RulesPanel() {
             >
               <span style={{ width: 84, opacity: 0.8 }}>{r.mode}</span>
               <code style={{ flex: 1, whiteSpace: 'pre-wrap' }}>
-                {JSON.stringify(r.scope)} · amt={r.amount}
+                {formatRuleScope(r.scope)} · amt={r.amount}
               </code>
               <button onClick={() => move(i, -1)} disabled={busy}>
                 ↑

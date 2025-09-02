@@ -168,6 +168,15 @@ export function deleteRule(id: number): void {
   db.prepare(`DELETE FROM rules WHERE id = ?`).run(id)
 }
 
+export function reorderRules(idsInOrder: number[]): void {
+  const transaction = db.transaction((ids: number[]) => {
+    for (let i = 0; i < ids.length; i++) {
+      db.prepare(`UPDATE rules SET priority = ? WHERE id = ?`).run(i, ids[i])
+    }
+  })
+  transaction(idsInOrder)
+}
+
 /* ---------------- Settings (KV: name/json) ---------------- */
 
 export function getTagPriority(): string[] {

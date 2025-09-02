@@ -11,6 +11,20 @@ type RuleScope =
   | 'weekday'
   | 'time_range'
 
+type RuleDTO = {
+  id: string
+  enabled: boolean
+  mode: 'exclusive' | 'additive' | 'multiplier'
+  scope:
+    | { kind: 'tag'; value: string }
+    | { kind: 'list'; value: string }
+    | { kind: 'project'; value: string }
+    | { kind: 'title_regex'; value: string }
+    | { kind: 'weekday'; value: number }
+    | { kind: 'time_range'; value: { start: string; end: string } }
+  amount: number
+}
+
 export type RuleRow = {
   id: number
   priority: number
@@ -61,18 +75,39 @@ export type RulesChangedMessage =
 
 /* ---------- Preload-safe Rules API ---------- */
 const rulesAPI = {
-  // CRUD
-  list(): Promise<RuleRow[]> {
+  // already had:
+  list(): Promise<RuleDTO[]> {
     return ipcRenderer.invoke('rules:list')
   },
-  upsert(payload: UpsertRulePayload): Promise<{ id: number }> {
+
+  // 🔧 FIXED: map DTO -> Upsert payload
+  create(rule: Omit<RuleDTO, 'id'>): Promise<{ id: number }> {
+    const payload = dtoToUpsert(rule)
+    console.log('[preload] rules.create -> upsert payload:', payload)
     return ipcRenderer.invoke('rules:upsert', payload)
   },
-  remove(id: number): Promise<{ ok: true }> {
-    return ipcRenderer.invoke('rules:delete', id)
+
+  update(
+    id: string,
+    patch: Partial<Omit<RuleDTO, 'id'>>,
+  ): Promise<{ id: number }> {
+    const payload = dtoToUpsert({ id, ...patch })
+    console.log('[preload] rules.update -> upsert payload:', payload)
+    return ipcRenderer.invoke('rules:upsert', payload)
   },
 
-  // Tag priority
+  remove(id: string): Promise<{ ok: true }> {
+    return ipcRenderer.invoke('rules:delete', Number(id))
+  },
+
+  // if you haven’t added this yet, it’s harmless to keep:
+  reorder(idsInOrder: string[]): Promise<{ ok: true }> {
+    return ipcRenderer.invoke(
+      'rules:reorder',
+      idsInOrder.map((s) => Number(s)),
+    )
+  },
+
   getTagPriority(): Promise<string[]> {
     return ipcRenderer.invoke('rules:getTagPriority')
   },
@@ -80,18 +115,12 @@ const rulesAPI = {
     return ipcRenderer.invoke('rules:setTagPriority', tags)
   },
 
-  // Tester
-  test(ctx: RuleTestContext): Promise<EvalBreakdown> {
-    return ipcRenderer.invoke('rules:test', ctx)
+  test(mockTask: unknown) {
+    return ipcRenderer.invoke('rules:test', mockTask)
   },
 
-  // Events
-  onChanged(cb: (msg: RulesChangedMessage) => void): () => void {
-    const handler = (_e: IpcRendererEvent, payload: unknown) => {
-      if (payload && typeof payload === 'object') {
-        cb(payload as RulesChangedMessage)
-      }
-    }
+  onChanged(cb: (msg: unknown) => void) {
+    const handler = (_e: IpcRendererEvent, payload: unknown) => cb(payload)
     ipcRenderer.on('rules:changed', handler)
     return () => ipcRenderer.off('rules:changed', handler)
   },
@@ -154,3 +183,48 @@ contextBridge.exposeInMainWorld('sync', {
     return () => ipcRenderer.off('sync:recent', handler)
   },
 })
+
+// Helper: map renderer RuleDTO (or patch of it) -> DB UpsertRulePayload
+function dtoToUpsert(
+  input: Partial<RuleDTO> & { id?: string; priority?: number },
+): UpsertRulePayload {
+  // figure out scope and matchValue
+  let scope: UpsertRulePayload['scope'] = 'title_regex'
+  let matchValue = ''
+  if (input.scope) {
+    const k = input.scope.kind
+    scope =
+      k === 'tag' ||
+      k === 'list' ||
+      k === 'project' ||
+      k === 'title_regex' ||
+      k === 'weekday' ||
+      k === 'time_range'
+        ? k
+        : 'title_regex'
+    if (k === 'time_range') {
+      matchValue = JSON.stringify(
+        (
+          input.scope as {
+            kind: 'time_range'
+            value: { start: string; end: string }
+          }
+        ).value,
+      )
+    } else {
+      matchValue = String(
+        (input.scope as { kind: string; value: string | number }).value ?? '',
+      )
+    }
+  }
+
+  return {
+    id: input.id ? Number(input.id) : undefined,
+    priority: typeof input.priority === 'number' ? input.priority : Date.now(),
+    type: (input.mode ?? 'additive') as UpsertRulePayload['type'],
+    scope,
+    matchValue,
+    amount: typeof input.amount === 'number' ? input.amount : 1,
+    enabled: input.enabled ?? true,
+  }
+}

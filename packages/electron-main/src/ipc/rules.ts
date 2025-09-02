@@ -4,12 +4,13 @@ import {
   listRules,
   upsertRule,
   deleteRule,
+  reorderRules,
   getTagPriority,
   setTagPriority,
   type UpsertRuleInput,
   type RuleRow,
 } from '../db/queries'
-import * as RulesModule from '../sync/rules'
+import * as RulesModule from '../rewards/evaluator'
 
 // ---- Types for the tester ----
 type RuleTestContext = {
@@ -63,10 +64,63 @@ function broadcastRulesChanged(payload: unknown) {
   }
 }
 
+// Convert RuleRow (DB format) to RuleDTO (renderer format)
+function ruleRowToDto(row: RuleRow): {
+  id: string
+  enabled: boolean
+  mode: 'exclusive' | 'additive' | 'multiplier'
+  scope:
+    | { kind: 'tag'; value: string }
+    | { kind: 'list'; value: string }
+    | { kind: 'project'; value: string }
+    | { kind: 'title_regex'; value: string }
+    | { kind: 'weekday'; value: number }
+    | { kind: 'time_range'; value: { start: string; end: string } }
+  amount: number
+} {
+  let scope:
+    | { kind: 'tag'; value: string }
+    | { kind: 'list'; value: string }
+    | { kind: 'project'; value: string }
+    | { kind: 'title_regex'; value: string }
+    | { kind: 'weekday'; value: number }
+    | { kind: 'time_range'; value: { start: string; end: string } }
+  switch (row.scope) {
+    case 'tag':
+      scope = { kind: 'tag', value: row.matchValue }
+      break
+    case 'list':
+      scope = { kind: 'list', value: row.matchValue }
+      break
+    case 'project':
+      scope = { kind: 'project', value: row.matchValue }
+      break
+    case 'title_regex':
+      scope = { kind: 'title_regex', value: row.matchValue }
+      break
+    case 'weekday':
+      scope = { kind: 'weekday', value: parseInt(row.matchValue) }
+      break
+    case 'time_range':
+      scope = { kind: 'time_range', value: JSON.parse(row.matchValue) }
+      break
+    default:
+      scope = { kind: 'title_regex', value: row.matchValue }
+  }
+
+  return {
+    id: String(row.id),
+    enabled: row.enabled,
+    mode: row.type,
+    scope,
+    amount: row.amount,
+  }
+}
+
 // Call this from your main ipc bootstrap
 export function registerRulesIpc(): void {
   // CRUD
-  ipcMain.handle('rules:list', () => listRules())
+  ipcMain.handle('rules:list', () => listRules().map(ruleRowToDto))
 
   ipcMain.handle(
     'rules:upsert',
@@ -82,6 +136,15 @@ export function registerRulesIpc(): void {
     broadcastRulesChanged({ id, deleted: true })
     return { ok: true }
   })
+
+  ipcMain.handle(
+    'rules:reorder',
+    (_e: IpcMainInvokeEvent, idsInOrder: number[]) => {
+      reorderRules(idsInOrder)
+      broadcastRulesChanged({ reordered: true })
+      return { ok: true }
+    },
+  )
 
   // Tag priority (canonical channels)
   ipcMain.handle('rules:getTagPriority', () => getTagPriority())
