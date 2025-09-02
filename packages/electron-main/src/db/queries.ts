@@ -1,6 +1,8 @@
 // packages/electron-main/src/db/queries.ts
 import { randomUUID } from 'node:crypto'
 import { openDb } from './index'
+// For return typing only; use inline import type in signature per request
+import type { Rule as EvaluatorRule } from '../rewards/evaluator'
 
 const db = openDb()
 
@@ -61,6 +63,7 @@ export type RuleScope =
   | 'project'
   | 'weekday'
   | 'time_range'
+  | 'deadline'
 
 export type RuleRow = {
   id: number
@@ -84,22 +87,123 @@ export type UpsertRuleInput = {
   enabled: boolean
 }
 
-export function listRules(): RuleRow[] {
-  const rows = db
-    .prepare<
-      [],
-      {
-        id: number
-        priority: number
-        type: RuleType
-        scope: RuleScope
-        matchValue: string
-        amount: number
-        enabled: 0 | 1
-        createdAt: number
-        updatedAt: number
+// Internal shape matching the SELECT below (not exported)
+type _Row = {
+  id: number
+  priority: number
+  type: RuleType
+  scope: RuleScope
+  matchValue: string
+  amount: number
+  enabled: 0 | 1
+  createdAt: number
+  updatedAt: number
+}
+
+// Map a DB row into evaluator Rule shape (narrow/no any)
+function _rowToEvaluatorRule(r: _Row): EvaluatorRule | null {
+  if (r.enabled !== 1) return null
+
+  let scope:
+    | { kind: 'tag'; value: string }
+    | { kind: 'list'; value: string }
+    | { kind: 'project'; value: string }
+    | { kind: 'title_regex'; value: string }
+    | { kind: 'weekday'; value: number }
+    | { kind: 'time_range'; value: { start: string; end: string } }
+    | { kind: 'deadline'; value: import('../rewards/types').DeadlineValue } // NEW
+
+  switch (r.scope) {
+    case 'tag':
+      scope = { kind: 'tag', value: r.matchValue }
+      break
+    case 'list':
+      scope = { kind: 'list', value: r.matchValue }
+      break
+    case 'project':
+      scope = { kind: 'project', value: r.matchValue }
+      break
+    case 'title_regex':
+      scope = { kind: 'title_regex', value: r.matchValue }
+      break
+    case 'weekday': {
+      const n = Number.parseInt(r.matchValue, 10)
+      if (!Number.isFinite(n) || n < 0 || n > 6) return null
+      scope = { kind: 'weekday', value: n }
+      break
+    }
+    case 'time_range': {
+      try {
+        const obj = JSON.parse(r.matchValue) as unknown
+        if (
+          obj &&
+          typeof obj === 'object' &&
+          typeof (obj as { start?: unknown }).start === 'string' &&
+          typeof (obj as { end?: unknown }).end === 'string'
+        ) {
+          scope = {
+            kind: 'time_range',
+            value: {
+              start: (obj as { start: string }).start,
+              end: (obj as { end: string }).end,
+            },
+          }
+        } else {
+          return null
+        }
+      } catch {
+        return null
       }
-    >(
+      break
+    }
+    case 'deadline': {
+      // NEW
+      // Accept plain strings: 'has_deadline' | 'overdue'
+      // Or JSON: { "withinHours": number }
+      const mv = r.matchValue.trim()
+      if (mv === 'has_deadline' || mv === 'overdue') {
+        scope = { kind: 'deadline', value: mv }
+        break
+      }
+      try {
+        const obj = JSON.parse(mv) as unknown
+        if (
+          obj &&
+          typeof obj === 'object' &&
+          typeof (obj as { withinHours?: unknown }).withinHours === 'number' &&
+          Number.isFinite((obj as { withinHours: number }).withinHours)
+        ) {
+          scope = {
+            kind: 'deadline',
+            value: {
+              withinHours: (obj as { withinHours: number }).withinHours,
+            },
+          }
+        } else {
+          return null
+        }
+      } catch {
+        return null
+      }
+      break
+    }
+    default:
+      return null
+  }
+
+  return {
+    id: String(r.id),
+    enabled: true,
+    mode: r.type,
+    scope,
+    amount: r.amount,
+  }
+}
+
+// Return evaluator-shaped rules, filtered to enabled and ordered by DB priority
+export function listRules(): import('../rewards/evaluator').Rule[] {
+  const rows = db
+    .prepare<[], _Row>(
       `SELECT id,
               priority,
               type,
@@ -114,7 +218,12 @@ export function listRules(): RuleRow[] {
     )
     .all()
 
-  return rows.map((r) => ({ ...r, enabled: r.enabled === 1 }))
+  const out: EvaluatorRule[] = []
+  for (const r of rows) {
+    const mapped = _rowToEvaluatorRule(r)
+    if (mapped) out.push(mapped)
+  }
+  return out
 }
 
 export function upsertRule(input: UpsertRuleInput): number {
