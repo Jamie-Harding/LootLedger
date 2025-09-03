@@ -2,14 +2,15 @@
 import { BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
 import * as Tick from './ticktickClient'
-// Use namespace import so we can optionally call insert helpers if present
-import * as Q from '../db/queries'
 import {
-  evaluateTask,
-  type Rule,
-  type TaskContext,
-  type EvalBreakdown,
-} from '../rewards/evaluator'
+  listRules,
+  getTagPriority,
+  insertTransaction,
+  getState,
+  setState,
+} from '../db/queries'
+import { evaluateTask, type Rule } from '../rewards/evaluator'
+import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
 import { randomUUID } from 'node:crypto'
 
 // ---------- Types ----------
@@ -168,7 +169,7 @@ export function getRecentBuffer(): RecentCompletion[] {
 }
 
 export function getStatus(): SyncStatus {
-  const lastSyncRaw = Q.getState('last_sync_at')
+  const lastSyncRaw = getState('last_sync_at')
   const lastSyncAt = lastSyncRaw ? Number(lastSyncRaw) : null
   const backoff = computeBackoffMs()
   const nextIn = nextPlannedAt
@@ -204,32 +205,15 @@ function toTaskContext(it: TickTickItem): TaskContext {
     title: it.title ?? '',
     tags: Array.isArray(it.tags) ? it.tags : [],
     list: undefined,
-    project: it.projectId ?? undefined, // <- no "any"
+    project: it.projectId ?? null,
     completedAt,
-    dueAt: coerceDueTs(it.due), // <- no "any", never null
+    dueAt: coerceDueTs(it.due) ?? null,
   }
 }
 
-// ---------- Optional insert bridge (won't throw if missing) ----------
-type InsertArg = {
-  id: string
-  created_at: number
-  amount: number
-  source: string
-  reason: string
-  metadata: string
-  voided?: 0 | 1
-}
-
-const insertTx: ((arg: InsertArg) => unknown) | undefined =
-  (Q as unknown as { insertTransaction?: (arg: InsertArg) => unknown })
-    .insertTransaction ??
-  (Q as unknown as { insertTicktickTransaction?: (arg: InsertArg) => unknown })
-    .insertTicktickTransaction
-
 // ---------- Core: one sync tick ----------
 export async function runOnce(): Promise<SyncNowResult> {
-  const lastSyncRaw = Q.getState('last_sync_at')
+  const lastSyncRaw = getState('last_sync_at')
   const lastSyncMs = lastSyncRaw ? Number(lastSyncRaw) : 0
   const sinceIso = new Date(lastSyncMs || 0).toISOString()
 
@@ -238,13 +222,8 @@ export async function runOnce(): Promise<SyncNowResult> {
     const items = await listSince(sinceIso)
 
     // 1.5) Load rules + tag order for this tick
-    // (listRules / getTagPriority exist in M4 queries; if not, default)
-    const rules: Rule[] =
-      (Q as unknown as { listRules?: () => Rule[] }).listRules?.() ?? []
-    const tagOrder: string[] =
-      (
-        Q as unknown as { getTagPriority?: () => string[] }
-      ).getTagPriority?.() ?? []
+    const rules: Rule[] = listRules()
+    const tagOrder: string[] = getTagPriority()
 
     // 2) Filter to truly-new completions, evaluate, and (optionally) insert tx
     let newCount = 0
@@ -271,35 +250,43 @@ export async function runOnce(): Promise<SyncNowResult> {
 
       // Evaluate with rules
       try {
-        const ctx = toTaskContext(it)
-        const breakdown = evaluateTask(ctx, rules, tagOrder)
-        const points = breakdown.pointsPrePenalty
-
-        // Optional DB insert (only if helper exists)
-        if (insertTx) {
-          const tx: InsertArg = {
-            id: randomUUID(),
-            created_at: rc.completedTs,
-            amount: points,
-            source: 'ticktick',
-            reason: rc.title || 'TickTick completion',
-            metadata: JSON.stringify({
-              taskId: rc.taskId,
-              tags: rc.tags,
-              projectId: rc.projectId,
-              dueTs: rc.dueTs,
-              isRecurring: rc.isRecurring,
-              seriesKey: rc.seriesKey,
-              eval: breakdown,
-            }),
-            voided: 0,
-          }
-          try {
-            insertTx(tx)
-          } catch (e) {
-            console.warn('[sync] insertTransaction failed:', e)
-          }
+        const ctx: TaskContext = {
+          id: it.id,
+          title: it.title ?? '',
+          tags: Array.isArray(it.tags) ? it.tags : [],
+          list: undefined,
+          project: it.projectId ?? null,
+          completedAt: rc.completedTs,
+          dueAt: rc.dueTs ?? null,
         }
+
+        const breakdown = evaluateTask(ctx, rules, tagOrder)
+
+        const meta: TaskTransactionMetaV1 = {
+          kind: 'task_evaluated',
+          version: 1,
+          breakdown,
+          task: {
+            id: ctx.id,
+            title: ctx.title,
+            tags: ctx.tags,
+            list: ctx.list,
+            project: ctx.project,
+            completedAt: ctx.completedAt,
+            dueAt: ctx.dueAt,
+          },
+        }
+
+        // Insert the main transaction (pre-penalty for M4)
+        await insertTransaction({
+          id: randomUUID(),
+          created_at: rc.completedTs,
+          amount: breakdown.pointsPrePenalty,
+          source: 'task',
+          reason: 'TickTick completion',
+          metadata: JSON.stringify(meta),
+          related_task_id: ctx.id,
+        })
       } catch (e) {
         console.warn('[sync] evaluation failed for task', rc.taskId, e)
       }
@@ -312,7 +299,7 @@ export async function runOnce(): Promise<SyncNowResult> {
 
     // 3) Advance sync cursor on success
     const now = Date.now()
-    Q.setState('last_sync_at', String(now))
+    setState('last_sync_at', String(now))
 
     // 4) Reset failure state, emit status
     consecutiveFailures = 0

@@ -31,6 +31,33 @@ export function insertTestTransaction(amount = 1): string {
   return id
 }
 
+export function insertTransaction(payload: {
+  id: string
+  created_at: number
+  amount: number
+  source: string
+  reason: string
+  metadata: string
+  related_task_id?: string
+  voided?: 0 | 1
+}): void {
+  db.prepare(
+    `INSERT INTO transactions
+       (id, created_at, amount, source, reason, metadata, related_task_id, voided)
+     VALUES
+       (@id, @created_at, @amount, @source, @reason, @metadata, @related_task_id, @voided)`,
+  ).run({
+    id: payload.id,
+    created_at: payload.created_at,
+    amount: payload.amount,
+    source: payload.source,
+    reason: payload.reason,
+    metadata: payload.metadata,
+    related_task_id: payload.related_task_id ?? null,
+    voided: payload.voided ?? 0,
+  })
+}
+
 /* ---------------- app_state helpers (M2) ---------------- */
 
 export function getState(key: string): string | null {
