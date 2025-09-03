@@ -253,6 +253,21 @@ export function upsertRule(input: UpsertRuleInput): number {
     return input.id
   }
 
+  if (input.scope === 'time_range') {
+    // Expect matchValue to be JSON {"start":"HH:MM","end":"HH:MM"}
+    try {
+      const o = JSON.parse(input.matchValue) as { start?: string; end?: string }
+      const isHHMM = (s?: string) => !!s && /^\d{2}:\d{2}$/.test(s)
+      if (!isHHMM(o.start) || !isHHMM(o.end)) {
+        throw new Error('Invalid time_range HH:MM')
+      }
+    } catch {
+      throw new Error(
+        'time_range.matchValue must be JSON with {"start":"HH:MM","end":"HH:MM"}',
+      )
+    }
+  }
+
   const info = db
     .prepare(
       `INSERT INTO rules
