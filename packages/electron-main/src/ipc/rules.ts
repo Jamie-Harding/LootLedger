@@ -10,7 +10,8 @@ import {
   type UpsertRuleInput,
   type RuleRow,
 } from '../db/queries'
-import * as RulesModule from '../rewards/evaluator'
+import type { TaskContext } from '../rewards/types'
+import { evaluateTask, type Rule } from '../rewards/evaluator'
 
 // ---- Types for the tester ----
 type RuleTestContext = {
@@ -21,38 +22,6 @@ type RuleTestContext = {
   project?: string
   completedAt: number // ms since epoch
   dueAt?: number | null // ms or null
-}
-
-type EvalBreakdown = {
-  pointsPrePenalty: number
-  baseSource: 'override' | 'exclusive' | 'none'
-  exclusiveRuleId?: string
-  additiveRuleIds: string[]
-  multiplierRuleIds: string[]
-  additiveSum: number
-  multiplierProduct: number
-}
-
-type EvalFn = (
-  ctx: RuleTestContext,
-  rules: ReturnType<typeof listRules>,
-  tagOrder: string[],
-) => EvalBreakdown
-
-// Resolve evaluator regardless of export shape/name
-function resolveEvaluator(mod: typeof RulesModule): EvalFn {
-  const m = mod as unknown as {
-    evaluateTask?: EvalFn
-    evaluate?: EvalFn
-    default?: { evaluateTask?: EvalFn; evaluate?: EvalFn }
-  }
-  if (m.evaluateTask) return m.evaluateTask
-  if (m.evaluate) return m.evaluate
-  if (m.default?.evaluateTask) return m.default.evaluateTask
-  if (m.default?.evaluate) return m.default.evaluate
-  throw new Error(
-    'rules evaluator not found (expected evaluateTask or evaluate)',
-  )
 }
 
 // Broadcast rules change to all windows
@@ -170,25 +139,19 @@ export function registerRulesIpc(): void {
   ipcMain.handle(
     'rules:test',
     (_e: IpcMainInvokeEvent, ctx: RuleTestContext) => {
-      const evalFn = resolveEvaluator(RulesModule)
-      const rules = listRules()
-      const tagOrder = getTagPriority()
-
-      // Rules are already in the correct format from listRules()
-      const convertedRules = rules
-
-      // Convert context to match evaluator expectations
-      const convertedCtx = {
+      const mock: TaskContext = {
         id: ctx.id || 'test',
         title: ctx.title,
         tags: ctx.tags,
-        list: ctx.list,
-        project: ctx.project,
+        list: ctx.list || null,
+        project: ctx.project || null,
         completedAt: ctx.completedAt,
-        dueAt: ctx.dueAt,
+        dueAt: ctx.dueAt || null,
       }
-
-      return evalFn(convertedCtx, convertedRules, tagOrder)
+      const rules: Rule[] = listRules()
+      const order = getTagPriority()
+      const res = evaluateTask(mock, rules, order)
+      return res
     },
   )
 }
