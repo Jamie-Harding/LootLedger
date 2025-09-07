@@ -187,7 +187,7 @@ This milestone introduces a **secure TickTick login flow** using OAuth 2.0 with 
 
 ## Overview
 
-This milestone connects Loot Ledger to the **TickTick Open API**, turning the **Sync now** button into a real data flow. Completed tasks in TickTick are pulled, normalized, and written to the local SQLite ledger. A background poller keeps the database up to date, and IPC bridges ensure the renderer UI updates instantly.
+This milestone connects Loot Ledger to the **TickTick Open API**, turning the **Sync now** button into a working data pipeline. Both open and completed tasks are mirrored into the local SQLite ledger, with a poller that keeps everything up to date. The system handles completions, revocations, and rollovers, while preserving a debug view of recent completions.
 
 ---
 
@@ -195,54 +195,68 @@ This milestone connects Loot Ledger to the **TickTick Open API**, turning the **
 
 - **TickTick API Client**
   - `sync/ticktickClient.ts`:
-    - `listChanges(sinceMs)` → fetches projects and completed tasks from TickTick’s Open API.
-    - Normalizes into typed `TickTickChange` objects: `{ id, title, tags, projectId, due_ts, completed_ts, is_recurring, series_key }`.
+    - `listOpenTasks()` → paginated Open API fetch of active tasks (status: 0).
+    - `getTaskByProjectAndId(projectId, taskId)` → verifies whether a disappeared task was actually completed, revoked, or deleted.
+    - `listProjects()` → resolves project IDs/names for verification.
+    - All responses normalized into strict `TickTask` objects.
+
+- **Completion Detection**
+  - `sync/index.ts`:
+    - Tracks **previous vs current open tasks**.
+    - Disappeared tasks are cross-checked with `getTaskByProjectAndId`:
+      - `status: 2` → verified completion.
+      - `status: 0` → revoked (task re-opened).
+      - 404 → deleted (ignored).
+
+    - Verified completions upserted into `completed_tasks` mirror table.
+    - Revocations remove entries so a task can later be completed again.
 
 - **Sync Worker**
-  - `sync/index.ts`:
-    - `runOnce()`:
-      - Validates access token via `getValidAccessToken()`.
-      - Reads `last_sync_at` from app state.
-      - Calls `ticktickClient.listChanges(since)`.
-      - Converts to transactions (`toTransactions`).
-      - Inserts into SQLite with `insertTransaction()`.
-      - Updates `last_sync_at` and resets backoff on success.
+  - `runOnce()`:
+    - Gets a fresh access token from auth.
+    - Loads `last_sync_at` from app state.
+    - Fetches open tasks and detects completions/disappearances.
+    - Classifies disappeared tasks (completed / revoked / deleted).
+    - Inserts new completions into SQLite, removes revoked ones.
+    - Updates `last_sync_at` on success.
 
-    - On errors: computes next backoff, stores it, and emits a failure status.
-    - `startScheduler()` runs `runOnce()` periodically with backoff logic.
+  - `startScheduler()` runs `runOnce()` on a 2–5 minute interval with backoff on errors.
 
 - **IPC Bridge**
   - `ipc.ts`:
-    - Registers `sync:now` and `sync:getStatus`.
-    - Subscribes to `syncEvents` and broadcasts `sync:status` to all windows.
+    - Exposes `sync:now`, `sync:getStatus`, and `completions:recent`.
+    - Renderer can request recent completions and open tasks directly.
 
   - `preload.ts`:
-    - Exposes `window.sync.now()`, `window.sync.getStatus()`, and `window.sync.onStatus(cb)` in the renderer sandbox.
-    - Exposes `window.oauth.onStatusChanged(cb)` for live auth updates.
+    - Exposes `window.sync` helpers in the renderer.
+    - Exposes `window.completions.recent(limit)` for debug panel.
+
+- **Renderer Debug Panel**
+  - `main.tsx`:
+    - Displays **Recent Completions** table (title, tags, due date, completed time).
+    - Updates instantly after sync finishes.
+    - Shows revocations correctly (items drop off when un-completed).
 
 - **Auth Integration**
   - `auth/index.ts`:
-    - Added `broadcastAuthStatus()` calls in login, error, and logout paths.
-    - All windows receive `auth:statusChanged` events immediately.
-
-- **Renderer Updates**
-  - `main.tsx`:
-    - Subscribes to `sync.onStatus` → updates **Last Sync** and refreshes balance when sync finishes.
-    - Subscribes to `oauth.onStatusChanged` → flips auth state in real time.
-    - “Sync now” button now runs the full pipeline.
+    - Emits `auth:statusChanged` whenever tokens are refreshed, invalidated, or cleared.
 
 ---
 
 ## Acceptance Criteria
 
 - Clicking **Sync now**:
-  - Pulls TickTick completions since `last_sync_at`.
-  - Inserts them into SQLite as transactions.
+  - Mirrors all open tasks into the DB.
+  - Detects completions since the last sync.
+  - Verified completions inserted into `completed_tasks`.
+  - Revoked tasks are removed from `completed_tasks`.
   - Updates `last_sync_at`.
-  - Emits a `sync:status` event → renderer updates **Last Sync**.
+  - Emits a `sync:status` event → renderer updates **Last Sync** and refreshes debug panels.
 
-- Background poller keeps completions up to date on a schedule, with backoff on errors.
-- Auth connect/logout propagates instantly to the UI.
+- Background poller:
+  - Runs on schedule, with backoff on errors.
+  - Keeps both open and recently completed tasks accurate.
+  - Never double-counts the same completion (seen set includes taskId + completedTime).
 
 ---
 
@@ -263,11 +277,12 @@ This milestone connects Loot Ledger to the **TickTick Open API**, turning the **
 ## Files Added
 
 - **Electron Main**
-  - `src/sync/state.ts` (backoff tracking)
-  - `src/sync/rules.ts` (transaction conversion scaffolding)
+  - `src/sync/ticktickDate.ts` (parsing helpers for TickTick ISO dates)
+  - `src/sync/rules.ts` (scaffolding for M4 rule evaluation)
+  - `src/sync/state.ts` (backoff and last_sync tracking)
 
 ---
 
-✅ With M3 complete, Loot Ledger now has **real data flow from TickTick into the local ledger**. Balance may still stay flat until rules are added in M4, but sync and state updates are fully functional.
+✅ With M3 complete, Loot Ledger now has **real two-way mirroring of open and completed tasks** from TickTick. Recent Completions update live (including revocations), Open Tasks stay in sync, and the groundwork is laid for M4’s scoring rules.
 
 ---

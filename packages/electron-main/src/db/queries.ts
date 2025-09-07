@@ -367,12 +367,13 @@ export function upsertCompletedTask(item: {
   completed_ts: number
   is_recurring?: 0 | 1
   series_key?: string | null
+  verified?: 0 | 1
 }): void {
   db.prepare(
     `INSERT OR REPLACE INTO completed_tasks
-       (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key)
+       (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key, verified, revoked, revoked_ts)
      VALUES
-       (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key)`,
+       (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key, COALESCE(@verified, 1), 0, NULL)`,
   ).run({
     task_id: item.task_id,
     title: item.title,
@@ -383,6 +384,7 @@ export function upsertCompletedTask(item: {
     completed_ts: item.completed_ts,
     is_recurring: item.is_recurring ?? 0,
     series_key: item.series_key ?? null,
+    verified: item.verified ?? 1,
   })
 }
 
@@ -414,6 +416,7 @@ export function listRecentCompletions(limit: number): Array<{
     >(
       `SELECT task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key
        FROM completed_tasks
+       WHERE revoked = 0
        ORDER BY completed_ts DESC
        LIMIT ?`,
     )
@@ -527,6 +530,23 @@ export function clearMissingOpenTasks(keptIds: string[]): void {
   ).run(...keptIds)
 }
 
+export function revokeCompletion(task_id: string, revoked_ts: number): void {
+  db.prepare(
+    `UPDATE completed_tasks
+     SET revoked = 1, revoked_ts = @revoked_ts
+     WHERE task_id = @task_id AND revoked = 0`,
+  ).run({ task_id, revoked_ts })
+}
+
+export function hasActiveCompletion(task_id: string): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 AS ok FROM completed_tasks WHERE task_id = @task_id AND revoked = 0 LIMIT 1`,
+    )
+    .get({ task_id }) as { ok?: number } | undefined
+  return Boolean(row && row.ok === 1)
+}
+
 /* ---------------- Mirror Query Helpers (Structured) ---------------- */
 
 import type Database from 'better-sqlite3'
@@ -542,6 +562,7 @@ export type CompletedUpsert = {
   completed_ts: number
   is_recurring: number // 0/1
   series_key: string | null
+  verified?: number // 0/1; default 1
 }
 
 /** Row shape used to upsert into open_tasks. */
@@ -608,9 +629,9 @@ export type PrevOpenRow = {
 export function makeMirrorQueries(db: Database.Database) {
   const upsertCompleted = db.prepare(`
     INSERT OR IGNORE INTO completed_tasks
-      (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key)
+      (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key, verified, revoked, revoked_ts)
     VALUES
-      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key)
+      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key, COALESCE(@verified, 1), 0, NULL)
   `)
 
   const upsertOpen = db.prepare(`
@@ -644,11 +665,25 @@ export function makeMirrorQueries(db: Database.Database) {
 
   const countOpen = db.prepare(`SELECT COUNT(*) AS n FROM open_tasks`)
 
+  // Only list active (non-revoked) completions, newest first
   const listRecent = db.prepare(`
     SELECT task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key
     FROM completed_tasks
+    WHERE revoked = 0
     ORDER BY completed_ts DESC
     LIMIT @limit
+  `)
+
+  // Revoke the active completion for a given task_id (if any)
+  const revokeOne = db.prepare(`
+    UPDATE completed_tasks
+    SET revoked = 1, revoked_ts = @revoked_ts
+    WHERE task_id = @task_id AND revoked = 0
+  `)
+
+  // Optional: query to check if a non-revoked completion exists for an id
+  const hasActive = db.prepare(`
+    SELECT 1 AS ok FROM completed_tasks WHERE task_id = @task_id AND revoked = 0 LIMIT 1
   `)
 
   const insertRemoved = db.prepare(`
@@ -676,6 +711,13 @@ export function makeMirrorQueries(db: Database.Database) {
     },
     listRecentCompletions(limit: number): RecentCompletionRow[] {
       return listRecent.all({ limit }) as RecentCompletionRow[]
+    },
+    revokeCompletion(task_id: string, revoked_ts: number): void {
+      revokeOne.run({ task_id, revoked_ts })
+    },
+    hasActiveCompletion(task_id: string): boolean {
+      const row = hasActive.get({ task_id }) as { ok?: number } | undefined
+      return Boolean(row && row.ok === 1)
     },
     insertRemovedTask(row: RemovedUpsert): void {
       insertRemoved.run(row)

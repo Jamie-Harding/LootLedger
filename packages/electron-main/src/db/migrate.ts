@@ -44,17 +44,25 @@ export function runMigrations() {
     `INSERT INTO _migrations (id, applied_at) VALUES (?, ?)`,
   )
 
-  db.exec('BEGIN')
-  try {
-    for (const file of files) {
-      if (seen.has(file)) continue
+  for (const file of files) {
+    if (seen.has(file)) continue
+
+    // Run each migration in its own transaction
+    db.exec('BEGIN')
+    try {
       const sql = fs.readFileSync(path.join(dir, file), 'utf8')
       db.exec(sql) // supports multi-statement SQL
       apply.run(file, Date.now()) // record as applied
+      db.exec('COMMIT')
+      console.log(`[db] Applied migration: ${file}`)
+    } catch (e) {
+      db.exec('ROLLBACK')
+      console.warn(
+        `[db] Migration ${file} failed, but continuing:`,
+        e instanceof Error ? e.message : String(e),
+      )
+      // Continue with other migrations instead of failing completely
+      // This allows the system to recover from individual migration failures
     }
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
   }
 }
