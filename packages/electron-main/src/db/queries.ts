@@ -553,6 +553,10 @@ export type OpenUpsert = {
   list: string | null
   due_ts: number | null
   created_ts: number | null
+  etag: string | null
+  sort_order: number | null
+  updated_ts: number | null
+  last_seen_ts: number // set to Date.now() on upsert
 }
 
 /** Read shape for recent completions (for IPC DTO assembly). */
@@ -566,6 +570,33 @@ export type RecentCompletionRow = {
   completed_ts: number
   is_recurring: number
   series_key: string | null
+}
+
+/** Row shape used to upsert into removed_tasks. */
+export type RemovedUpsert = {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  removed_ts: number
+  reason: 'deleted_or_moved' | 'unknown'
+}
+
+/** Read shape for previous open tasks (for comparison). */
+export type PrevOpenRow = {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  created_ts: number | null
+  etag: string | null
+  sort_order: number | null
+  updated_ts: number | null
+  last_seen_ts: number | null
 }
 
 /**
@@ -582,29 +613,46 @@ export function makeMirrorQueries(db: Database.Database) {
 
   const upsertOpen = db.prepare(`
     INSERT INTO open_tasks
-      (task_id, title, tags_json, project_id, list, due_ts, created_ts)
+      (task_id, title, tags_json, project_id, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts)
     VALUES
-      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @created_ts)
+      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @created_ts, @etag, @sort_order, @updated_ts, @last_seen_ts)
     ON CONFLICT(task_id) DO UPDATE SET
       title=excluded.title,
       tags_json=excluded.tags_json,
       project_id=excluded.project_id,
       list=excluded.list,
       due_ts=excluded.due_ts,
-      created_ts=excluded.created_ts
+      created_ts=excluded.created_ts,
+      etag=excluded.etag,
+      sort_order=excluded.sort_order,
+      updated_ts=excluded.updated_ts,
+      last_seen_ts=excluded.last_seen_ts
   `)
 
-  // Accepts a JSON array of IDs and prunes anything not present. Keeps the open snapshot tidy.
-  const delMissingOpen = db.prepare(`
+  const readPrev = db.prepare(`
+    SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts
+    FROM open_tasks
+  `)
+
+  const pruneMissing = db.prepare(`
     DELETE FROM open_tasks
     WHERE task_id NOT IN (SELECT value FROM json_each(@ids_json))
   `)
 
-  const selectRecent = db.prepare(`
+  const countOpen = db.prepare(`SELECT COUNT(*) AS n FROM open_tasks`)
+
+  const listRecent = db.prepare(`
     SELECT task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key
     FROM completed_tasks
     ORDER BY completed_ts DESC
     LIMIT @limit
+  `)
+
+  const insertRemoved = db.prepare(`
+    INSERT OR IGNORE INTO removed_tasks
+      (task_id, title, tags_json, project_id, list, due_ts, removed_ts, reason)
+    VALUES
+      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @removed_ts, @reason)
   `)
 
   return {
@@ -614,12 +662,20 @@ export function makeMirrorQueries(db: Database.Database) {
     upsertOpenTask(row: OpenUpsert): void {
       upsertOpen.run(row)
     },
-    clearMissingOpenTasks(ids: string[]): void {
-      const ids_json = JSON.stringify(ids)
-      delMissingOpen.run({ ids_json })
+    readPreviousOpen(): PrevOpenRow[] {
+      return readPrev.all() as PrevOpenRow[]
+    },
+    pruneOpenExcept(ids: string[]): void {
+      pruneMissing.run({ ids_json: JSON.stringify(ids) })
+    },
+    countOpenTasks(): number {
+      return Number((countOpen.get() as { n: number }).n)
     },
     listRecentCompletions(limit: number): RecentCompletionRow[] {
-      return selectRecent.all({ limit }) as RecentCompletionRow[]
+      return listRecent.all({ limit }) as RecentCompletionRow[]
+    },
+    insertRemovedTask(row: RemovedUpsert): void {
+      insertRemoved.run(row)
     },
   }
 }

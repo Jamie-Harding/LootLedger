@@ -166,13 +166,16 @@ export function registerSyncIpc(): void {
       const { openDb } = await import('./db/index')
       const db = openDb()
       const tables = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .prepare<
+          [],
+          { name: string }
+        >("SELECT name FROM sqlite_master WHERE type='table'")
         .all()
       console.log(
         '[debug] Available tables:',
-        tables.map((t: { name: string }) => t.name),
+        tables.map((t) => t.name),
       )
-      return tables.map((t: { name: string }) => t.name)
+      return tables.map((t) => t.name)
     } catch (error) {
       console.error('[debug] Error checking tables:', error)
       throw error
