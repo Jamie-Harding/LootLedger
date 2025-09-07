@@ -5,6 +5,7 @@ import { buildAuthUrl, exchangeCode, refreshToken } from './ticktick'
 import { saveTokens, loadTokens, clearTokens } from './keychain'
 import { getState, setState } from '../db/queries'
 import { BrowserWindow } from 'electron'
+import { emitStatus } from '../sync'
 
 const ACCOUNT = 'ticktick'
 const LOOPBACK_PORT = Number(process.env.OAUTH_LOOPBACK_PORT ?? '8802') // must match TickTick redirect
@@ -38,6 +39,7 @@ export async function startAuthFlow(): Promise<void> {
           })
           setState('auth_status', 'signed_in')
           broadcastAuthStatus('signed_in')
+          emitStatus() // Update sync status after successful login
         } catch (e) {
           setState('auth_status', 'error')
           broadcastAuthStatus('error')
@@ -85,6 +87,7 @@ export function logout(): void {
   clearTokens(ACCOUNT)
   setState('auth_status', 'signed_out')
   broadcastAuthStatus('signed_out')
+  emitStatus() // Update sync status after logout
 }
 
 export function authStatus(): 'signed_in' | 'signed_out' | 'error' {

@@ -95,9 +95,8 @@ export function registerAuthIpc(): void {
 export function registerSyncIpc(): void {
   // Core sync routes used by your preload & renderer
   ipcMain.handle('sync:now', async () => {
-    // run a one-shot tick and return an immediate snapshot so renderer can update
-    await runOnce()
-    return getStatus()
+    // run a one-shot tick and return the result directly
+    return await runOnce()
   })
 
   ipcMain.handle('sync:getStatus', () => getStatus())

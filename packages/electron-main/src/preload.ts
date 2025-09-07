@@ -184,12 +184,10 @@ type OpenRow = {
 contextBridge.exposeInMainWorld('sync', {
   now: () =>
     ipcRenderer.invoke('sync:now') as Promise<{
-      lastSyncAt: number | null
-      error: string | null
-      polling: boolean
-      pollSeconds: number
-      backoffMs: number
-      nextRunInMs: number
+      ok: boolean
+      at?: number
+      added?: number
+      error?: string
     }>,
   getStatus: (): Promise<SyncStatus> => ipcRenderer.invoke('sync:getStatus'),
   getRecent: () => ipcRenderer.invoke('sync:getRecent'),
@@ -198,6 +196,22 @@ contextBridge.exposeInMainWorld('sync', {
     const handler = (_evt: IpcRendererEvent, payload: SyncStatus) => cb(payload)
     ipcRenderer.on('sync:status', handler)
     return () => ipcRenderer.off('sync:status', handler)
+  },
+
+  onResult: (
+    cb: (s: {
+      ok: boolean
+      at?: number
+      added?: number
+      error?: string
+    }) => void,
+  ) => {
+    const handler = (
+      _evt: IpcRendererEvent,
+      payload: { ok: boolean; at?: number; added?: number; error?: string },
+    ) => cb(payload)
+    ipcRenderer.on('sync:result', handler)
+    return () => ipcRenderer.off('sync:result', handler)
   },
 
   onRecent: (cb: (items: unknown[]) => void) => {

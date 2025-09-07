@@ -569,7 +569,7 @@ export async function listCompletedSince(
   auth: TickTickAuth,
   sinceIso: string,
   untilIso: string = new Date().toISOString(),
-  limit: number = 500,
+  limit: number = 800,
 ): Promise<TickTask[]> {
   // If you already have an official Open API method that returns completions since a timestamp,
   // replace the block below with that call. Keep the return shape unchanged.

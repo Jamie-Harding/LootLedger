@@ -2,6 +2,13 @@
 import { BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
 import * as Tick from './ticktickClient'
+import {
+  listOpenTasks,
+  listCompletedSince,
+  TickTask,
+  TickTickAuth,
+  listOpenTasksLegacy,
+} from './ticktickClient'
 import { parseTickTickDate } from './ticktickDate'
 import {
   listRules,
@@ -12,13 +19,17 @@ import {
   upsertCompletedTask,
   upsertOpenTask,
   clearMissingOpenTasks,
-  listOpenTasks,
+  listOpenTasks as listOpenTasksFromDb,
+  makeMirrorQueries,
 } from '../db/queries'
+import { openDb } from '../db/index'
+import { getValidAccessToken } from '../auth'
 import { evaluateTask, type Rule } from '../rewards/evaluator'
 import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
 import { randomUUID } from 'node:crypto'
 
 const SYNC_TRACE = process.env.SYNC_TRACE === '1'
+const ROLLOVER_MIN_DELTA_MS = 60_000
 
 // ---------- Types ----------
 export type RecentCompletion = {
@@ -129,7 +140,7 @@ function broadcastRecent() {
   syncEvents.emit('recent', recentBuffer)
 }
 
-function emitStatus() {
+export function emitStatus() {
   const status = getStatus()
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('sync:status', status)
@@ -138,8 +149,9 @@ function emitStatus() {
 }
 
 function emitOneShot(payload: SyncNowResult) {
+  console.log('[sync] emitOneShot - payload:', payload)
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('sync:status', payload)
+    win.webContents.send('sync:result', payload)
   }
 }
 
@@ -190,153 +202,170 @@ type SyncNowResult =
 
 // ---------- Core: one sync tick ----------
 export async function runOnce(): Promise<SyncNowResult> {
-  const lastSyncRaw = getState('last_sync_at')
-  const lastSyncMs = lastSyncRaw ? Number(lastSyncRaw) : 0
-  const sinceIso = new Date(lastSyncMs || 0).toISOString()
-
-  if (SYNC_TRACE) console.info('[sync] sinceIso =', sinceIso)
-
   try {
-    // 1) Pull changed/completed tasks
-    console.log('[sync] Fetching completed tasks since:', sinceIso)
-    const items = await listSince(sinceIso)
-    console.log('[sync] Fetched completed items:', items.length, 'items')
+    console.log('[sync] Starting sync...')
 
-    // Log some details about the fetched items for debugging
-    if (items.length > 0) {
-      console.log('[sync] Sample of fetched items:')
-      items.slice(0, 3).forEach((item, index) => {
-        console.log(`[sync] Item ${index + 1}:`, {
-          id: item.id,
-          title: item.title,
-          completedTime: item.completedTime,
-          tags: item.tags,
-        })
-      })
+    const authToken = await getValidAccessToken()
+    if (!authToken) {
+      throw new Error('No valid access token available')
     }
+    console.log('[sync] Got auth token')
 
-    // 1.1) DETECT COMPLETIONS BY TASK DISAPPEARANCE
-    // Since TickTick API doesn't provide completed tasks, we detect them by comparing
-    // the current open tasks with previously stored open tasks
-    console.log('[sync] Detecting completions by task disappearance...')
-    const currentOpenTasks = await Tick.listOpenTasksLegacy()
-    console.log('[sync] Current open tasks:', currentOpenTasks.length)
+    const auth: TickTickAuth = { accessToken: authToken }
 
-    // Get previously stored open tasks from database
-    const previousOpenTasks = listOpenTasks()
-    console.log(
-      '[sync] Previously stored open tasks:',
-      previousOpenTasks.length,
-    )
+    const now = Date.now()
+    const rawLast = Number(getState('last_sync_at') || 0)
+    const sinceMs =
+      rawLast > 0 && rawLast <= now ? rawLast : now - 7 * 24 * 3600_000
+    const sinceIso = new Date(sinceMs).toISOString()
+    console.log('[sync] Since time:', sinceIso)
 
-    // Find tasks that were open before but are not open now (likely completed)
-    const disappearedTasks = previousOpenTasks.filter(
-      (prevTask) =>
-        !currentOpenTasks.some(
-          (currentTask) => currentTask.id === prevTask.task_id,
-        ),
-    )
+    // Initialize mirror queries
+    const db = openDb()
+    const Q = makeMirrorQueries(db)
 
-    console.log(
-      '[sync] Found',
-      disappearedTasks.length,
-      'disappeared tasks (likely completed)',
-    )
+    // 1) Read prev snapshot BEFORE any writes
+    const prevRows = Q.readPreviousOpen()
+    console.log('[sync] Previous open tasks:', prevRows.length)
+    const prevById = new Map(prevRows.map((r) => [r.task_id, r]))
+    const prevIds = new Set(prevRows.map((r) => r.task_id))
 
-    // Convert disappeared tasks to completion items and add to items array
-    for (const disappearedTask of disappearedTasks) {
-      console.log(
-        '[sync] Processing disappeared task:',
-        disappearedTask.title,
-        disappearedTask.task_id,
-      )
-
-      // Create a completion item for the disappeared task
-      const completionItem = {
-        id: disappearedTask.task_id,
-        title: disappearedTask.title,
-        tags: disappearedTask.tags, // tags is already parsed as string[]
-        projectId: disappearedTask.project_id ?? undefined,
-        due: disappearedTask.due_ts,
-        completedTime: Date.now(), // Use current time as completion time
-        isRecurring: false, // We don't have this info for disappeared tasks
-        seriesKey: null,
+    // 2) Fetch ALL open tasks (using legacy function)
+    console.log('[sync] Fetching current open tasks...')
+    const freshLegacy = await listOpenTasksLegacy()
+    console.log('[sync] Current open tasks (legacy):', freshLegacy.length)
+    const currRows = freshLegacy.map((o) => {
+      const due_ts = o.dueAt ?? null
+      return {
+        task_id: o.id,
+        title: o.title,
+        tags_json: JSON.stringify(o.tags ?? []),
+        project_id: o.project ?? null,
+        list: o.list ?? null,
+        due_ts,
+        created_ts: o.createdAt ?? null,
+        etag: null as string | null,
+        sort_order: null as number | null,
+        updated_ts: null as number | null,
+        last_seen_ts: now,
       }
+    })
+    const currIds = new Set(currRows.map((r) => r.task_id))
 
+    // 3a) Disappearances (candidate set)
+    const disappearedIds: string[] = []
+    for (const id of prevIds) if (!currIds.has(id)) disappearedIds.push(id)
+    console.log('[sync] Disappeared tasks:', disappearedIds.length)
+
+    // 3b) Rollovers (same id, due advanced or etag changed with some due movement)
+    type CurrRow = (typeof currRows)[number]
+    const currById = new Map(currRows.map((r) => [r.task_id, r]))
+    const rollovers: Array<{ prev: (typeof prevRows)[number]; curr: CurrRow }> =
+      []
+
+    for (const id of currIds) {
+      const prev = prevById.get(id)
+      if (!prev) continue
+      const curr = currById.get(id)!
+      const prevDue = prev.due_ts ?? null
+      const currDue = curr.due_ts ?? null
+      const dueAdvanced =
+        prevDue != null &&
+        currDue != null &&
+        currDue - prevDue >= ROLLOVER_MIN_DELTA_MS
+      const dueChangedAtAll = (prevDue ?? null) !== (currDue ?? null)
+      const etagChanged = (prev.etag || null) !== (curr.etag || null)
+
+      if (dueAdvanced || (etagChanged && dueChangedAtAll)) {
+        rollovers.push({ prev, curr })
+      }
+    }
+    console.log('[sync] Rollovers found:', rollovers.length)
+
+    // 4) For disappearance candidates, cross-check via completions API in a minimal window.
+    // Window lower bound = min(last_seen_ts among those ids) - 1 day (to be safe).
+    let minLastSeen = now
+    for (const id of disappearedIds) {
+      const p = prevById.get(id)
+      if (p?.last_seen_ts != null && p.last_seen_ts < minLastSeen)
+        minLastSeen = p.last_seen_ts
+    }
+    const fromMs = Math.min(minLastSeen, now) - 24 * 3600_000
+    const fromIso = new Date(fromMs).toISOString()
+
+    const completedEvidenceById = new Map<string, number>() // id → completed_ts (ms)
+    try {
       console.log(
-        '[sync] Adding disappeared task as completion:',
-        completionItem.title,
+        '[sync] Checking completions API from:',
+        fromIso,
+        'to:',
+        new Date(now).toISOString(),
       )
-      items.push(completionItem)
+      const completed = await listCompletedSince(
+        auth,
+        fromIso,
+        new Date(now).toISOString(),
+        800,
+      )
+      console.log('[sync] Completions API returned:', completed.length, 'tasks')
+      for (const t of completed) {
+        if (t.status !== 2) continue
+        const ct = parseTickTickDate(t.completedTime ?? null)
+        if (ct == null) continue
+        // A given id may complete multiple times if recurring; keep the latest we saw in the window
+        const prevCt = completedEvidenceById.get(t.id) ?? 0
+        if (ct > prevCt) completedEvidenceById.set(t.id, ct)
+      }
+      console.log(
+        '[sync] Found evidence for',
+        completedEvidenceById.size,
+        'completed tasks',
+      )
+    } catch (e) {
+      console.error(
+        '[sync] completions cross-check failed; treating disappearances cautiously:',
+        (e as Error).message,
+      )
     }
 
-    if (SYNC_TRACE)
-      console.info('[sync] fetched completed items =', items.length)
-
-    // 1.5) Load rules + tag order for this tick
+    // 5) Load rules + tag order for task evaluation
     const rules: Rule[] = listRules()
     const tagOrder: string[] = getTagPriority()
 
-    // 2) Filter to truly-new completions, evaluate, and (optionally) insert tx
-    let newCount = 0
-    let processed = 0
-    console.log(
-      '[sync] Processing',
-      items.length,
-      'items for task evaluation...',
-    )
+    // 6) Mirror: rollovers are confirmed completions; disappearances require evidence
+    let mirroredCompletions = 0
+    let quarantinedRemoved = 0
+    let processedTransactions = 0
 
-    for (const it of items) {
-      const taskId = it.id
-      const completedTs =
-        typeof it.completedTime === 'number' ? it.completedTime : 0
+    // Rollovers → definitely a completion (use previous instance metadata)
+    for (const x of rollovers) {
+      const prev = x.prev
+      const completed_ts = now // we don't have precise; next improvement can hydrate if needed
 
-      console.log('[sync] Processing task:', {
-        id: taskId,
-        title: it.title,
-        completedTime: it.completedTime,
-        completedTs,
-        hasValidId: !!taskId,
-        hasValidCompletedTs: !!completedTs,
+      // Mirror to completed_tasks table
+      Q.upsertCompletedTask({
+        task_id: prev.task_id,
+        title: prev.title,
+        tags_json: prev.tags_json,
+        project_id: prev.project_id,
+        list: prev.list,
+        due_ts: prev.due_ts,
+        completed_ts,
+        is_recurring: 1,
+        series_key: null,
       })
 
-      if (!taskId || !completedTs) {
-        console.log(
-          '[sync] Skipping task due to missing id or completedTs:',
-          taskId,
-          completedTs,
-        )
-        continue
-      }
-
-      const k = key(taskId, completedTs)
-      if (seen.has(k)) {
-        console.log('[sync] Skipping already seen task:', k)
-        continue
-      }
-      seen.add(k)
-
-      const rc: RecentCompletion = {
-        taskId,
-        title: it.title ?? '',
-        tags: Array.isArray(it.tags) ? it.tags : [],
-        projectId: it.projectId,
-        dueTs: coerceDueTs(it.due),
-        completedTs,
-        isRecurring: !!it.isRecurring,
-        seriesKey: it.seriesKey ?? null,
-      }
-
-      // Evaluate with rules
+      // Evaluate and create transaction
       try {
+        const tags = JSON.parse(prev.tags_json) as string[]
         const ctx: TaskContext = {
-          id: it.id,
-          title: it.title ?? '',
-          tags: Array.isArray(it.tags) ? it.tags : [],
-          list: undefined,
-          project: it.projectId ?? null,
-          completedAt: rc.completedTs,
-          dueAt: rc.dueTs ?? null,
+          id: prev.task_id,
+          title: prev.title,
+          tags: Array.isArray(tags) ? tags : [],
+          list: prev.list,
+          project: prev.project_id,
+          completedAt: completed_ts,
+          dueAt: prev.due_ts,
         }
 
         const breakdown = evaluateTask(ctx, rules, tagOrder)
@@ -359,94 +388,176 @@ export async function runOnce(): Promise<SyncNowResult> {
         // Insert the main transaction (pre-penalty for M4)
         await insertTransaction({
           id: randomUUID(),
-          created_at: rc.completedTs,
+          created_at: completed_ts,
           amount: breakdown.pointsPrePenalty,
           source: 'task',
-          reason: 'TickTick completion',
+          reason: 'TickTick completion (rollover)',
           metadata: JSON.stringify(meta),
           related_task_id: ctx.id,
         })
 
-        // Mirror completed task to completed_tasks table
-        upsertCompletedTask({
-          task_id: it.id,
-          title: it.title ?? '',
-          tags_json: JSON.stringify(it.tags ?? []),
-          project_id: it.projectId ?? null,
-          list: null, // list not available in TickTickItem
-          due_ts: coerceDueTs(it.due) ?? null,
-          completed_ts: rc.completedTs,
-          is_recurring: it.isRecurring ? 1 : 0,
-          series_key: it.seriesKey ?? null,
-        })
-
-        processed++
+        // Add to recent buffer
+        const rc: RecentCompletion = {
+          taskId: prev.task_id,
+          title: prev.title,
+          tags: ctx.tags,
+          projectId: prev.project_id ?? undefined,
+          dueTs: prev.due_ts,
+          completedTs: completed_ts,
+          isRecurring: true,
+          seriesKey: null,
+        }
+        pushRecent(rc)
+        processedTransactions++
       } catch (e) {
-        console.warn('[sync] evaluation failed for task', rc.taskId, e)
-      }
-
-      pushRecent(rc)
-      newCount++
-
-      console.log('[sync] Successfully processed task:', {
-        id: taskId,
-        title: it.title,
-        completedTs,
-        newCount,
-        processed,
-      })
-    }
-
-    console.log(
-      '[sync] Task processing complete. Processed:',
-      processed,
-      'New:',
-      newCount,
-    )
-    if (SYNC_TRACE) console.info('[sync] processed =', processed)
-
-    if (newCount > 0) broadcastRecent()
-
-    // Mirror open tasks
-    try {
-      const open = await Tick.listOpenTasksLegacy()
-      for (const o of open) {
-        upsertOpenTask({
-          task_id: o.id,
-          title: o.title,
-          tags_json: JSON.stringify(o.tags ?? []),
-          project_id: o.project ?? null,
-          list: o.list ?? null,
-          due_ts: o.dueAt ?? null,
-          created_ts: o.createdAt ?? null,
-        })
-      }
-      // Clear open tasks that are no longer present
-      clearMissingOpenTasks(open.map((x) => x.id))
-
-      if (SYNC_TRACE) {
-        console.info(
-          '[sync] mirrored completed:',
-          processed,
-          'open:',
-          open.length,
+        console.warn(
+          '[sync] evaluation failed for rollover task',
+          prev.task_id,
+          e,
         )
       }
-    } catch (e) {
-      console.warn('[sync] failed to mirror open tasks:', e)
+
+      mirroredCompletions++
     }
 
-    // 3) Advance sync cursor on success
-    const now = Date.now()
-    setState('last_sync_at', String(now))
+    // Disappearances → only if completions API says so; else quarantine as removed
+    for (const id of disappearedIds) {
+      const prev = prevById.get(id)
+      if (!prev) continue
 
-    // 4) Reset failure state, emit status
+      const evidenceTs = completedEvidenceById.get(id)
+      if (typeof evidenceTs === 'number') {
+        // Mirror to completed_tasks table
+        Q.upsertCompletedTask({
+          task_id: prev.task_id,
+          title: prev.title,
+          tags_json: prev.tags_json,
+          project_id: prev.project_id,
+          list: prev.list,
+          due_ts: prev.due_ts,
+          completed_ts: evidenceTs,
+          is_recurring: 0,
+          series_key: null,
+        })
+
+        // Evaluate and create transaction
+        try {
+          const tags = JSON.parse(prev.tags_json) as string[]
+          const ctx: TaskContext = {
+            id: prev.task_id,
+            title: prev.title,
+            tags: Array.isArray(tags) ? tags : [],
+            list: prev.list,
+            project: prev.project_id,
+            completedAt: evidenceTs,
+            dueAt: prev.due_ts,
+          }
+
+          const breakdown = evaluateTask(ctx, rules, tagOrder)
+
+          const meta: TaskTransactionMetaV1 = {
+            kind: 'task_evaluated',
+            version: 1,
+            breakdown,
+            task: {
+              id: ctx.id,
+              title: ctx.title,
+              tags: ctx.tags,
+              list: ctx.list,
+              project: ctx.project,
+              completedAt: ctx.completedAt,
+              dueAt: ctx.dueAt,
+            },
+          }
+
+          // Insert the main transaction (pre-penalty for M4)
+          await insertTransaction({
+            id: randomUUID(),
+            created_at: evidenceTs,
+            amount: breakdown.pointsPrePenalty,
+            source: 'task',
+            reason: 'TickTick completion (disappeared)',
+            metadata: JSON.stringify(meta),
+            related_task_id: ctx.id,
+          })
+
+          // Add to recent buffer
+          const rc: RecentCompletion = {
+            taskId: prev.task_id,
+            title: prev.title,
+            tags: ctx.tags,
+            projectId: prev.project_id ?? undefined,
+            dueTs: prev.due_ts,
+            completedTs: evidenceTs,
+            isRecurring: false,
+            seriesKey: null,
+          }
+          pushRecent(rc)
+          processedTransactions++
+        } catch (e) {
+          console.warn(
+            '[sync] evaluation failed for disappeared task',
+            prev.task_id,
+            e,
+          )
+        }
+
+        mirroredCompletions++
+      } else {
+        Q.insertRemovedTask({
+          task_id: prev.task_id,
+          title: prev.title,
+          tags_json: prev.tags_json,
+          project_id: prev.project_id,
+          list: prev.list,
+          due_ts: prev.due_ts,
+          removed_ts: now,
+          reason: 'deleted_or_moved',
+        })
+        quarantinedRemoved++
+      }
+    }
+
+    // 7) Replace snapshot and prune
+    for (const row of currRows) Q.upsertOpenTask(row)
+    Q.pruneOpenExcept(currRows.map((r) => r.task_id))
+
+    // 8) Advance last_sync_at conservatively (+1s guard)
+    const nextLast = Math.max(sinceMs, now) + 1000
+    setState('last_sync_at', String(nextLast))
+
+    console.log(
+      '[sync] Final results - mirrored completions:',
+      mirroredCompletions,
+      'removed quarantined:',
+      quarantinedRemoved,
+      'transactions processed:',
+      processedTransactions,
+    )
+    if (process.env.SYNC_TRACE === '1') {
+      console.info(
+        '[sync] mirrored completions:',
+        mirroredCompletions,
+        'removed quarantined:',
+        quarantinedRemoved,
+        'transactions processed:',
+        processedTransactions,
+        'next last_sync_at:',
+        nextLast,
+      )
+    }
+
+    // 9) Broadcast recent completions if any were processed
+    if (processedTransactions > 0) {
+      broadcastRecent()
+    }
+
+    // Reset failure state, emit status
     consecutiveFailures = 0
     lastError = null
-    // send both: the one-shot (renderer listens for this) and the full snapshot
-    emitOneShot({ ok: true, at: now, added: newCount })
+    emitOneShot({ ok: true, at: now, added: processedTransactions })
     emitStatus()
-    return { ok: true, at: now, added: newCount }
+    return { ok: true, at: now, added: processedTransactions }
   } catch (err) {
     consecutiveFailures = Math.min(consecutiveFailures + 1, 8)
     lastError = stringifyError(err)

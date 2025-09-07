@@ -143,6 +143,7 @@ type SyncAPI = {
   now(): Promise<SyncNowResult>
   getStatus(): Promise<{ lastSyncAt: number | null }>
   onStatus?(cb: (p: SyncStatusPayload) => void): void
+  onResult?(cb: (p: SyncStatusPayload) => void): void
 }
 
 declare global {
@@ -543,17 +544,17 @@ function App() {
     }
   }, [lastSync, loadCompletions, loadOpenTasks])
 
-  // Subscribe to sync status push from main (updates Last Sync + balance immediately)
+  // Subscribe to sync result push from main (updates Last Sync + balance immediately)
   React.useEffect(() => {
-    if (typeof window.sync.onStatus === 'function') {
+    if (typeof window.sync.onResult === 'function') {
       const handler = (p: SyncStatusPayload) => {
-        console.log('[renderer] sync status via IPC:', p)
+        console.log('[renderer] sync result via IPC:', p)
         if (p.ok && typeof p.at === 'number') {
           setLastSync(String(p.at))
           void refreshBalance()
         }
       }
-      window.sync.onStatus(handler)
+      window.sync.onResult(handler)
     }
   }, [refreshBalance])
 

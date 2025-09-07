@@ -89,8 +89,8 @@ app.whenReady().then(async () => {
     openDb()
     try {
       const db = openDb()
-      const cols = db.prepare('PRAGMA table_info(settings)').all()
-      console.log('[debug] settings columns:', cols)
+      const cols = db.prepare('PRAGMA table_info(app_state)').all()
+      console.log('[debug] app_state columns:', cols)
     } catch (e) {
       console.error('[debug] PRAGMA failed:', e)
     }
