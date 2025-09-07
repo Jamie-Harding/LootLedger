@@ -13,6 +13,8 @@ import { evaluateTask, type Rule } from '../rewards/evaluator'
 import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
 import { randomUUID } from 'node:crypto'
 
+const SYNC_TRACE = process.env.SYNC_TRACE === '1'
+
 // ---------- Types ----------
 export type RecentCompletion = {
   taskId: string
@@ -217,9 +219,14 @@ export async function runOnce(): Promise<SyncNowResult> {
   const lastSyncMs = lastSyncRaw ? Number(lastSyncRaw) : 0
   const sinceIso = new Date(lastSyncMs || 0).toISOString()
 
+  if (SYNC_TRACE) console.info('[sync] sinceIso =', sinceIso)
+
   try {
     // 1) Pull changed/completed tasks
     const items = await listSince(sinceIso)
+
+    if (SYNC_TRACE)
+      console.info('[sync] fetched completed items =', items.length)
 
     // 1.5) Load rules + tag order for this tick
     const rules: Rule[] = listRules()
@@ -227,6 +234,7 @@ export async function runOnce(): Promise<SyncNowResult> {
 
     // 2) Filter to truly-new completions, evaluate, and (optionally) insert tx
     let newCount = 0
+    let processed = 0
     for (const it of items) {
       const taskId = it.id
       const completedTs =
@@ -287,6 +295,7 @@ export async function runOnce(): Promise<SyncNowResult> {
           metadata: JSON.stringify(meta),
           related_task_id: ctx.id,
         })
+        processed++
       } catch (e) {
         console.warn('[sync] evaluation failed for task', rc.taskId, e)
       }
@@ -294,6 +303,8 @@ export async function runOnce(): Promise<SyncNowResult> {
       pushRecent(rc)
       newCount++
     }
+
+    if (SYNC_TRACE) console.info('[sync] processed =', processed)
 
     if (newCount > 0) broadcastRecent()
 
