@@ -550,6 +550,7 @@ export type OpenUpsert = {
   title: string
   tags_json: string
   project_id: string | null
+  project_name: string | null // ← NEW
   list: string | null
   due_ts: number | null
   created_ts: number | null
@@ -590,6 +591,7 @@ export type PrevOpenRow = {
   title: string
   tags_json: string
   project_id: string | null
+  project_name: string | null // ← NEW
   list: string | null
   due_ts: number | null
   created_ts: number | null
@@ -613,13 +615,14 @@ export function makeMirrorQueries(db: Database.Database) {
 
   const upsertOpen = db.prepare(`
     INSERT INTO open_tasks
-      (task_id, title, tags_json, project_id, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts)
+      (task_id, title, tags_json, project_id, project_name, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts)
     VALUES
-      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @created_ts, @etag, @sort_order, @updated_ts, @last_seen_ts)
+      (@task_id, @title, @tags_json, @project_id, @project_name, @list, @due_ts, @created_ts, @etag, @sort_order, @updated_ts, @last_seen_ts)
     ON CONFLICT(task_id) DO UPDATE SET
       title=excluded.title,
       tags_json=excluded.tags_json,
       project_id=excluded.project_id,
+      project_name=excluded.project_name,
       list=excluded.list,
       due_ts=excluded.due_ts,
       created_ts=excluded.created_ts,
@@ -630,7 +633,7 @@ export function makeMirrorQueries(db: Database.Database) {
   `)
 
   const readPrev = db.prepare(`
-    SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts
+    SELECT task_id, title, tags_json, project_id, project_name, list, due_ts, created_ts, etag, sort_order, updated_ts, last_seen_ts
     FROM open_tasks
   `)
 

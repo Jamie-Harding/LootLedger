@@ -3,11 +3,14 @@ import { BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
 // import * as Tick from './ticktickClient'
 import {
+  listOpenTasks,
+  listProjects,
   getTaskByProjectAndId,
+  TickTask,
   TickTickAuth,
-  listOpenTasksLegacy,
+  TickProject,
 } from './ticktickClient'
-// import { parseTickTickDate } from './ticktickDate'
+import { parseTickTickDate } from './ticktickDate'
 import {
   listRules,
   getTagPriority,
@@ -21,6 +24,65 @@ import { getValidAccessToken } from '../auth'
 import { evaluateTask, type Rule } from '../rewards/evaluator'
 import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
 import { randomUUID } from 'node:crypto'
+
+const HEX24 = /^[a-fA-F0-9]{24}$/
+
+function isTickId(s: string | null | undefined): s is string {
+  return typeof s === 'string' && HEX24.test(s)
+}
+
+function buildProjectIndex(projects: TickProject[]): {
+  byId: Map<string, TickProject>
+  byName: Map<string, TickProject>
+} {
+  const byId = new Map<string, TickProject>()
+  const byName = new Map<string, TickProject>()
+  for (const p of projects) {
+    byId.set(p.id, p)
+    byName.set(p.name, p)
+  }
+  return { byId, byName }
+}
+
+async function resolveProjectId(
+  auth: TickTickAuth,
+  prevProjectId: string | null,
+  prevListName: string | null,
+  prevProjectName: string | null,
+  projectsCache?: {
+    byId: Map<string, TickProject>
+    byName: Map<string, TickProject>
+  },
+): Promise<{
+  projectId: string | null
+  cache: { byId: Map<string, TickProject>; byName: Map<string, TickProject> }
+}> {
+  // If it already looks like an ID, we're done.
+  if (isTickId(prevProjectId)) {
+    return {
+      projectId: prevProjectId!,
+      cache: projectsCache ?? buildProjectIndex(await listProjects(auth)),
+    }
+  }
+
+  // Ensure we have a cache
+  const cache = projectsCache ?? buildProjectIndex(await listProjects(auth))
+
+  // Try resolving by project name first (most reliable for legacy data)
+  if (prevProjectName && cache.byName.has(prevProjectName)) {
+    return { projectId: cache.byName.get(prevProjectName)!.id, cache }
+  }
+
+  // Try resolving by list name (legacy snapshots often stored the name in project_id or list)
+  const candidateName =
+    prevProjectId && !isTickId(prevProjectId) ? prevProjectId : prevListName
+  if (candidateName && cache.byName.has(candidateName)) {
+    return { projectId: cache.byName.get(candidateName)!.id, cache }
+  }
+
+  // Give up — caller will quarantine as removed/moved.
+  return { projectId: null, cache }
+}
 
 // const SYNC_TRACE = process.env.SYNC_TRACE === '1'
 const ROLLOVER_MIN_DELTA_MS = 60_000
@@ -224,23 +286,33 @@ export async function runOnce(): Promise<SyncNowResult> {
     const prevById = new Map(prevRows.map((r) => [r.task_id, r]))
     const prevIds = new Set(prevRows.map((r) => r.task_id))
 
-    // 2) Fetch ALL open tasks (using legacy function)
-    console.log('[sync] Fetching current open tasks...')
-    const freshLegacy = await listOpenTasksLegacy()
-    console.log('[sync] Current open tasks (legacy):', freshLegacy.length)
-    const currRows = freshLegacy.map((o) => {
-      const due_ts = o.dueAt ?? null
+    // 2) Fetch current open tasks via OAuth Open API (paginated)
+    const fresh: TickTask[] = await listOpenTasks(auth)
+    console.info('[sync] Current open tasks:', fresh.length)
+
+    // Fetch projects to map project IDs to names
+    const projects = await listProjects(auth)
+    const projectIdToName = new Map(projects.map((p) => [p.id, p.name]))
+
+    const currRows = fresh.map((t) => {
+      const due_ts = parseTickTickDate(t.dueDate ?? null)
+      const start_ts = parseTickTickDate(t.startDate ?? null)
+      const updated_ts = parseTickTickDate(t.updatedTime ?? null)
+      const project_name = t.projectId
+        ? (projectIdToName.get(t.projectId) ?? null)
+        : null
       return {
-        task_id: o.id,
-        title: o.title,
-        tags_json: JSON.stringify(o.tags ?? []),
-        project_id: o.project ?? null,
-        list: o.list ?? null,
+        task_id: t.id,
+        title: t.title,
+        tags_json: JSON.stringify(t.tags ?? []),
+        project_id: t.projectId ?? null,
+        project_name, // fill if you have it in the payload; else keep null
+        list: null as string | null,
         due_ts,
-        created_ts: o.createdAt ?? null,
-        etag: null as string | null,
-        sort_order: null as number | null,
-        updated_ts: null as number | null,
+        created_ts: start_ts,
+        etag: t.etag ?? null,
+        sort_order: t.sortOrder ?? null,
+        updated_ts,
         last_seen_ts: now,
       }
     })
@@ -282,13 +354,38 @@ export async function runOnce(): Promise<SyncNowResult> {
     let mirrored = 0
     let quarantined = 0
 
+    // Build project cache once per run; reuse in classifyOne()
+    let projectsIndex:
+      | { byId: Map<string, TickProject>; byName: Map<string, TickProject> }
+      | undefined
+
     async function classifyOne(id: string): Promise<void> {
       const prev = prevById.get(id)
       if (!prev) return
 
-      const projectId = prev.project_id
-      if (!projectId) {
-        // We need projectId for the Open API route; if missing, quarantine.
+      // Normalize projectId
+      const resolved = await resolveProjectId(
+        auth,
+        prev.project_id,
+        prev.list,
+        prev.project_name,
+        projectsIndex,
+      )
+      projectsIndex = resolved.cache
+
+      if (!resolved.projectId) {
+        if (process.env.SYNC_TRACE === '1') {
+          console.warn(
+            '[sync] could not resolve projectId for task',
+            id,
+            'prev.project_id:',
+            prev.project_id,
+            'prev.project_name:',
+            prev.project_name,
+            'prev.list:',
+            prev.list,
+          )
+        }
         Q.insertRemovedTask({
           task_id: prev.task_id,
           title: prev.title,
@@ -303,9 +400,9 @@ export async function runOnce(): Promise<SyncNowResult> {
         return
       }
 
-      const res = await getTaskByProjectAndId(auth, projectId, id)
+      // Confirm status via Open API
+      const res = await getTaskByProjectAndId(auth, resolved.projectId, id)
       if (!res.ok) {
-        // 404 or other → not confirmed as completed; treat as removed/moved
         Q.insertRemovedTask({
           task_id: prev.task_id,
           title: prev.title,
@@ -322,21 +419,19 @@ export async function runOnce(): Promise<SyncNowResult> {
 
       const t = res.task
       if (t.status === 2) {
-        // Confirmed completion via Open API
         Q.upsertCompletedTask({
           task_id: prev.task_id,
           title: prev.title,
           tags_json: prev.tags_json,
-          project_id: prev.project_id,
+          project_id: resolved.projectId,
           list: prev.list,
           due_ts: prev.due_ts,
-          completed_ts: now, // you can map to parseTickTickDate(t.completedTime ?? null) if provided
+          completed_ts: now, // or parseTickTickDate(t.completedTime ?? null) if present
           is_recurring: 0,
           series_key: null,
         })
         mirrored++
       } else {
-        // Not completed → probably moved/archived
         Q.insertRemovedTask({
           task_id: prev.task_id,
           title: prev.title,

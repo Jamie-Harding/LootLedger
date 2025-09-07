@@ -65,8 +65,53 @@ export interface TickTask {
   updatedTime?: string | null
 }
 
+export interface TickProject {
+  id: string
+  name: string
+}
+
 /** Access token carrier; wire it to your existing auth. */
 export type TickTickAuth = { accessToken: string }
+
+export async function listProjects(auth: TickTickAuth): Promise<TickProject[]> {
+  // Replace URL with the exact Open API route you're already using; common pattern is /open/v1/project
+  const url = new URL('https://api.ticktick.com/open/v1/project')
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  })
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    console.error(
+      '[ticktick][projects] HTTP',
+      res.status,
+      res.statusText,
+      'body=',
+      body.slice(0, 300),
+    )
+    throw new Error(`HTTP_${res.status}`)
+  }
+
+  const json = (await res.json()) as unknown
+  if (!Array.isArray(json)) {
+    console.error('[ticktick][projects] non-array JSON')
+    return []
+  }
+
+  // Minimal, strict mapping
+  const items: TickProject[] = []
+  for (const raw of json as Array<Record<string, unknown>>) {
+    const id = typeof raw.id === 'string' ? raw.id : null
+    const name = typeof raw.name === 'string' ? raw.name : null
+    if (id && name) items.push({ id, name })
+  }
+
+  if (process.env.SYNC_TRACE === '1') {
+    console.info('[ticktick][projects] count=', items.length)
+  }
+  return items
+}
 
 // Discriminated union item expected by downstream code
 export type TickTickChange = TickCompletedItem & { type: 'completed' }
@@ -659,52 +704,74 @@ export async function listCompletedSince(
 
 /**
  * Fetch OPEN (status=0) tasks you want to mirror into the "open_tasks" table.
- * Uses Open API with pagination to get all open tasks.
+ * Uses the working Open API v1 approach by fetching each project's data.
  */
 export async function listOpenTasks(
   auth: TickTickAuth,
   limitPerPage: number = 200,
 ): Promise<TickTask[]> {
-  const seen = new Set<string>()
   const items: TickTask[] = []
-  let page = 0
 
-  for (;;) {
-    // Use Open API base
-    const url = new URL('https://api.ticktick.com/open/v1/project/all/tasks')
-    url.searchParams.set('limit', String(limitPerPage))
-    url.searchParams.set('offset', String(page * limitPerPage))
-    url.searchParams.set('page', String(page + 1)) // defensive
+  // Get all projects first
+  const projects = await listProjects(auth)
+  console.log('[ticktick] Found projects:', projects.length)
 
-    const json = await httpJson(url, auth)
-    if (!Array.isArray(json)) break
-    const mapped = (json as Raw[]).map(mapRawTask).filter((t) => t.status === 0)
+  // Fetch tasks from each project
+  for (const project of projects) {
+    try {
+      console.log(`[ticktick] Fetching tasks from project: ${project.name}`)
 
-    let added = 0
-    for (const t of mapped) {
-      if (seen.has(t.id)) continue
-      seen.add(t.id)
-      items.push(t)
-      added++
-    }
-
-    if (process.env.SYNC_TRACE === '1') {
-      console.info(
-        '[ticktick][open] page=',
-        page + 1,
-        'returned=',
-        (json as unknown[]).length,
-        'addedOpen=',
-        added,
-        'acc=',
-        items.length,
+      // Use the working Open API v1 endpoint for project data
+      const url = new URL(
+        `https://api.ticktick.com/open/v1/project/${encodeURIComponent(project.id)}/data`,
       )
-    }
 
-    if ((json as unknown[]).length < limitPerPage || added === 0) break
-    page++
-    if (page > 1000) break
+      const res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${auth.accessToken}` },
+      })
+
+      if (!res.ok) {
+        console.warn(
+          `[ticktick] Project ${project.name} data endpoint failed: ${res.status}`,
+        )
+        continue
+      }
+
+      const data = (await res.json()) as Record<string, unknown>
+
+      // Extract tasks from the project data
+      const tasks = data.tasks as Array<Record<string, unknown>> | undefined
+      if (!Array.isArray(tasks)) {
+        console.log(
+          `[ticktick] No tasks array found in project ${project.name}`,
+        )
+        continue
+      }
+
+      console.log(
+        `[ticktick] Project ${project.name} has ${tasks.length} total tasks`,
+      )
+
+      // Map and filter for open tasks (status !== 2)
+      const openTasks = tasks.map(mapRawTask).filter((t) => t.status !== 2) // Filter out completed tasks
+
+      console.log(
+        `[ticktick] Project ${project.name} has ${openTasks.length} open tasks`,
+      )
+
+      for (const task of openTasks) {
+        items.push(task)
+      }
+    } catch (error) {
+      console.warn(
+        `[ticktick] Failed to get tasks from project ${project.name}:`,
+        error,
+      )
+      // Continue with other projects even if one fails
+    }
   }
+
+  console.log(`[ticktick] Total open tasks found: ${items.length}`)
   return items
 }
 
