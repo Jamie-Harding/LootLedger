@@ -318,6 +318,24 @@ export async function runOnce(): Promise<SyncNowResult> {
     })
     const currIds = new Set(currRows.map((r) => r.task_id))
 
+    // 2.5) Revocations: if a task is currently open but we previously recorded it as completed (revoked=0),
+    // revoke that completion so it no longer appears in "Recent Completions".
+    // This handles the user action "mark as not completed" in TickTick.
+    let revokedCount = 0
+    for (const row of currRows) {
+      const id = row.task_id
+      if (Q.hasActiveCompletion(id)) {
+        Q.revokeCompletion(id, now)
+        revokedCount++
+      }
+    }
+    if (process.env.SYNC_TRACE === '1' && revokedCount > 0) {
+      console.info(
+        '[sync] Revoked completions due to re-opened tasks:',
+        revokedCount,
+      )
+    }
+
     // 3a) Disappearances (candidate set)
     const disappearedIds: string[] = []
     for (const id of prevIds) if (!currIds.has(id)) disappearedIds.push(id)
@@ -419,6 +437,7 @@ export async function runOnce(): Promise<SyncNowResult> {
 
       const t = res.task
       if (t.status === 2) {
+        const apiCompletedTs = parseTickTickDate(t.completedTime ?? null)
         Q.upsertCompletedTask({
           task_id: prev.task_id,
           title: prev.title,
@@ -426,9 +445,10 @@ export async function runOnce(): Promise<SyncNowResult> {
           project_id: resolved.projectId,
           list: prev.list,
           due_ts: prev.due_ts,
-          completed_ts: now, // or parseTickTickDate(t.completedTime ?? null) if present
+          completed_ts: apiCompletedTs ?? now, // prefer precise timestamp when available
           is_recurring: 0,
           series_key: null,
+          verified: 1,
         })
         mirrored++
       } else {
@@ -490,9 +510,10 @@ export async function runOnce(): Promise<SyncNowResult> {
         project_id: prev.project_id,
         list: prev.list,
         due_ts: prev.due_ts,
-        completed_ts,
+        completed_ts: now, // recurring instance completed "now" (heuristic)
         is_recurring: 1,
         series_key: null,
+        verified: 1,
       })
 
       // Evaluate and create transaction
