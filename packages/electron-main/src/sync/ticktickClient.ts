@@ -34,6 +34,16 @@ export type TickCompletedItem = {
   seriesKey?: string | null
 }
 
+export type TickOpenItem = {
+  id: string
+  title: string
+  tags: string[]
+  list?: string | null
+  project?: string | null
+  dueAt?: number | null
+  createdAt?: number | null
+}
+
 // Discriminated union item expected by downstream code
 export type TickTickChange = TickCompletedItem & { type: 'completed' }
 
@@ -156,6 +166,55 @@ export class TickTickClient {
     }))
     return changes
   }
+
+  /**
+   * Return open/incomplete tasks from all projects.
+   * We fetch each project's data and filter locally for status != 2 (not completed).
+   */
+  async listOpenTasks(): Promise<TickOpenItem[]> {
+    const projects = await this.listProjects()
+
+    const items: TickOpenItem[] = []
+    for (const p of projects) {
+      try {
+        const data = await this.getProjectData(p.id)
+
+        // Some payloads expose everything under `tasks`; others may split.
+        const candidateLists: RawTask[][] = []
+        if (Array.isArray(data.tasks)) candidateLists.push(data.tasks)
+        if (Array.isArray(data.completedTasks))
+          candidateLists.push(data.completedTasks)
+
+        for (const list of candidateLists) {
+          for (const t of list) {
+            if (!t || t.deleted) continue
+            const status = typeof t.status === 'number' ? t.status : undefined
+            // Only include tasks that are not completed (status != 2)
+            if (status !== 2) {
+              items.push({
+                id: t.id,
+                title: t.title ?? '',
+                tags: Array.isArray(t.tags) ? t.tags : [],
+                list: null, // TickTick doesn't expose list info in this API
+                project: p.name,
+                dueAt: t.dueDate ? Date.parse(t.dueDate) : null,
+                createdAt: null, // Creation time not available in current API structure
+              })
+            }
+          }
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        // Non-fatal per project; continue others
+        console.warn('[ticktick] project fetch failed', p.id, msg)
+      }
+    }
+
+    // Sort by creation time for consistency
+    items.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+
+    return items
+  }
 }
 
 // --- Adapters expected by sync/index.ts ---------------------------
@@ -214,3 +273,13 @@ export async function listCompletedTasksSince(
 
 // Alias so sync/index.ts can find either name
 export const listChanges = listCompletedTasksSince
+
+export async function listOpenTasks(): Promise<TickOpenItem[]> {
+  const token = await getValidAccessToken() // likely string | null
+  if (!token) {
+    throw new Error('ticktickClient: no access token (not signed in)')
+  }
+
+  const client = new TickTickClient(token)
+  return client.listOpenTasks()
+}

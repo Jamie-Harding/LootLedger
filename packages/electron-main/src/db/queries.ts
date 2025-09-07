@@ -354,3 +354,175 @@ export function setTagPriority(tags: string[]): void {
       ON CONFLICT(name) DO UPDATE SET json = excluded.json`,
   ).run(json)
 }
+
+/* ---------------- Mirror Tables (M3) ---------------- */
+
+export function upsertCompletedTask(item: {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  completed_ts: number
+  is_recurring?: 0 | 1
+  series_key?: string | null
+}): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO completed_tasks
+       (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key)
+     VALUES
+       (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key)`,
+  ).run({
+    task_id: item.task_id,
+    title: item.title,
+    tags_json: item.tags_json,
+    project_id: item.project_id ?? null,
+    list: item.list ?? null,
+    due_ts: item.due_ts ?? null,
+    completed_ts: item.completed_ts,
+    is_recurring: item.is_recurring ?? 0,
+    series_key: item.series_key ?? null,
+  })
+}
+
+export function listRecentCompletions(limit: number): Array<{
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  completed_ts: number
+  is_recurring?: boolean
+  series_key?: string | null
+}> {
+  const rows = db
+    .prepare<
+      [number],
+      {
+        task_id: string
+        title: string
+        tags_json: string
+        project_id: string | null
+        list: string | null
+        due_ts: number | null
+        completed_ts: number
+        is_recurring: number
+        series_key: string | null
+      }
+    >(
+      `SELECT task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key
+       FROM completed_tasks
+       ORDER BY completed_ts DESC
+       LIMIT ?`,
+    )
+    .all(limit)
+
+  return rows.map((row) => ({
+    task_id: row.task_id,
+    title: row.title,
+    tags: (() => {
+      try {
+        const parsed = JSON.parse(row.tags_json)
+        return Array.isArray(parsed)
+          ? parsed.filter((t) => typeof t === 'string')
+          : []
+      } catch {
+        return []
+      }
+    })(),
+    project_id: row.project_id,
+    list: row.list,
+    due_ts: row.due_ts,
+    completed_ts: row.completed_ts,
+    is_recurring: Boolean(row.is_recurring),
+    series_key: row.series_key,
+  }))
+}
+
+export function upsertOpenTask(item: {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  created_ts?: number | null
+}): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO open_tasks
+       (task_id, title, tags_json, project_id, list, due_ts, created_ts)
+     VALUES
+       (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @created_ts)`,
+  ).run({
+    task_id: item.task_id,
+    title: item.title,
+    tags_json: item.tags_json,
+    project_id: item.project_id ?? null,
+    list: item.list ?? null,
+    due_ts: item.due_ts ?? null,
+    created_ts: item.created_ts ?? null,
+  })
+}
+
+export function listOpenTasks(): Array<{
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  created_ts?: number | null
+}> {
+  const rows = db
+    .prepare<
+      [],
+      {
+        task_id: string
+        title: string
+        tags_json: string
+        project_id: string | null
+        list: string | null
+        due_ts: number | null
+        created_ts: number | null
+      }
+    >(
+      `SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts
+       FROM open_tasks`,
+    )
+    .all()
+
+  return rows.map((row) => ({
+    task_id: row.task_id,
+    title: row.title,
+    tags: (() => {
+      try {
+        const parsed = JSON.parse(row.tags_json)
+        return Array.isArray(parsed)
+          ? parsed.filter((t) => typeof t === 'string')
+          : []
+      } catch {
+        return []
+      }
+    })(),
+    project_id: row.project_id,
+    list: row.list,
+    due_ts: row.due_ts,
+    created_ts: row.created_ts,
+  }))
+}
+
+export function clearMissingOpenTasks(keptIds: string[]): void {
+  if (keptIds.length === 0) {
+    // If no IDs to keep, clear all open tasks
+    db.prepare(`DELETE FROM open_tasks`).run()
+    return
+  }
+
+  // Create placeholders for the IN clause
+  const placeholders = keptIds.map(() => '?').join(',')
+  db.prepare(
+    `DELETE FROM open_tasks WHERE task_id NOT IN (${placeholders})`,
+  ).run(...keptIds)
+}
