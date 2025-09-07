@@ -8,5 +8,9 @@ CREATE TABLE IF NOT EXISTS open_tasks (
   project_id TEXT,
   list TEXT,
   due_ts INTEGER,
-  created_ts INTEGER
+  created_ts INTEGER,
+  etag TEXT,
+  sort_order INTEGER,
+  updated_ts INTEGER,
+  last_seen_ts INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
