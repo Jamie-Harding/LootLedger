@@ -81,6 +81,18 @@ export function registerSyncIpc(): void {
   ipcMain.handle('sync:getStatus', () => getStatus())
   ipcMain.handle('sync:getRecent', () => getRecentBuffer())
 
+  // Mirror data endpoints
+  ipcMain.handle(
+    'completions:recent',
+    (_e: IpcMainInvokeEvent, limit: number) => {
+      return Queries.listRecentCompletions(limit)
+    },
+  )
+
+  ipcMain.handle('open:list', () => {
+    return Queries.listOpenTasks()
+  })
+
   // Also register the Rules CRUD  Tester IPC here so main.ts doesn’t need to change
   registerRulesIpc()
 }

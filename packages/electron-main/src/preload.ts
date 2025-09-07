@@ -156,6 +156,28 @@ type SyncStatus = {
   nextRunInMs: number
 }
 
+type CompletionRow = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  completed_ts: number
+  is_recurring?: boolean
+  series_key?: string | null
+}
+
+type OpenRow = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  created_ts?: number | null
+}
+
 contextBridge.exposeInMainWorld('sync', {
   now: () =>
     ipcRenderer.invoke('sync:now') as Promise<{
@@ -180,6 +202,15 @@ contextBridge.exposeInMainWorld('sync', {
     ipcRenderer.on('sync:recent', handler)
     return () => ipcRenderer.off('sync:recent', handler)
   },
+})
+
+contextBridge.exposeInMainWorld('completions', {
+  recent: (limit: number): Promise<CompletionRow[]> =>
+    ipcRenderer.invoke('completions:recent', limit),
+})
+
+contextBridge.exposeInMainWorld('openTasks', {
+  list: (): Promise<OpenRow[]> => ipcRenderer.invoke('open:list'),
 })
 
 // Helper: map renderer RuleDTO (or patch of it) -> DB UpsertRulePayload

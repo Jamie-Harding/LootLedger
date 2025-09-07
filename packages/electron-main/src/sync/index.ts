@@ -8,6 +8,9 @@ import {
   insertTransaction,
   getState,
   setState,
+  upsertCompletedTask,
+  upsertOpenTask,
+  clearMissingOpenTasks,
 } from '../db/queries'
 import { evaluateTask, type Rule } from '../rewards/evaluator'
 import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
@@ -295,6 +298,20 @@ export async function runOnce(): Promise<SyncNowResult> {
           metadata: JSON.stringify(meta),
           related_task_id: ctx.id,
         })
+
+        // Mirror completed task to completed_tasks table
+        upsertCompletedTask({
+          task_id: it.id,
+          title: it.title ?? '',
+          tags_json: JSON.stringify(it.tags ?? []),
+          project_id: it.projectId ?? null,
+          list: null, // list not available in TickTickItem
+          due_ts: coerceDueTs(it.due) ?? null,
+          completed_ts: rc.completedTs,
+          is_recurring: it.isRecurring ? 1 : 0,
+          series_key: it.seriesKey ?? null,
+        })
+
         processed++
       } catch (e) {
         console.warn('[sync] evaluation failed for task', rc.taskId, e)
@@ -307,6 +324,35 @@ export async function runOnce(): Promise<SyncNowResult> {
     if (SYNC_TRACE) console.info('[sync] processed =', processed)
 
     if (newCount > 0) broadcastRecent()
+
+    // Mirror open tasks
+    try {
+      const open = await Tick.listOpenTasks()
+      for (const o of open) {
+        upsertOpenTask({
+          task_id: o.id,
+          title: o.title,
+          tags_json: JSON.stringify(o.tags ?? []),
+          project_id: o.project ?? null,
+          list: o.list ?? null,
+          due_ts: o.dueAt ?? null,
+          created_ts: o.createdAt ?? null,
+        })
+      }
+      // Clear open tasks that are no longer present
+      clearMissingOpenTasks(open.map((x) => x.id))
+
+      if (SYNC_TRACE) {
+        console.info(
+          '[sync] mirrored completed:',
+          processed,
+          'open:',
+          open.length,
+        )
+      }
+    } catch (e) {
+      console.warn('[sync] failed to mirror open tasks:', e)
+    }
 
     // 3) Advance sync cursor on success
     const now = Date.now()
