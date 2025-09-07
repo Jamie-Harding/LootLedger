@@ -526,3 +526,100 @@ export function clearMissingOpenTasks(keptIds: string[]): void {
     `DELETE FROM open_tasks WHERE task_id NOT IN (${placeholders})`,
   ).run(...keptIds)
 }
+
+/* ---------------- Mirror Query Helpers (Structured) ---------------- */
+
+import type Database from 'better-sqlite3'
+
+/** Row shape used to upsert into completed_tasks. */
+export type CompletedUpsert = {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  completed_ts: number
+  is_recurring: number // 0/1
+  series_key: string | null
+}
+
+/** Row shape used to upsert into open_tasks. */
+export type OpenUpsert = {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  created_ts: number | null
+}
+
+/** Read shape for recent completions (for IPC DTO assembly). */
+export type RecentCompletionRow = {
+  task_id: string
+  title: string
+  tags_json: string
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  completed_ts: number
+  is_recurring: number
+  series_key: string | null
+}
+
+/**
+ * Mirror query helpers. Call once (with the shared DB) and reuse.
+ * These do NOT modify your transactions/evaluator; they only maintain mirror tables.
+ */
+export function makeMirrorQueries(db: Database.Database) {
+  const upsertCompleted = db.prepare(`
+    INSERT OR IGNORE INTO completed_tasks
+      (task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key)
+    VALUES
+      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @completed_ts, @is_recurring, @series_key)
+  `)
+
+  const upsertOpen = db.prepare(`
+    INSERT INTO open_tasks
+      (task_id, title, tags_json, project_id, list, due_ts, created_ts)
+    VALUES
+      (@task_id, @title, @tags_json, @project_id, @list, @due_ts, @created_ts)
+    ON CONFLICT(task_id) DO UPDATE SET
+      title=excluded.title,
+      tags_json=excluded.tags_json,
+      project_id=excluded.project_id,
+      list=excluded.list,
+      due_ts=excluded.due_ts,
+      created_ts=excluded.created_ts
+  `)
+
+  // Accepts a JSON array of IDs and prunes anything not present. Keeps the open snapshot tidy.
+  const delMissingOpen = db.prepare(`
+    DELETE FROM open_tasks
+    WHERE task_id NOT IN (SELECT value FROM json_each(@ids_json))
+  `)
+
+  const selectRecent = db.prepare(`
+    SELECT task_id, title, tags_json, project_id, list, due_ts, completed_ts, is_recurring, series_key
+    FROM completed_tasks
+    ORDER BY completed_ts DESC
+    LIMIT @limit
+  `)
+
+  return {
+    upsertCompletedTask(row: CompletedUpsert): void {
+      upsertCompleted.run(row)
+    },
+    upsertOpenTask(row: OpenUpsert): void {
+      upsertOpen.run(row)
+    },
+    clearMissingOpenTasks(ids: string[]): void {
+      const ids_json = JSON.stringify(ids)
+      delMissingOpen.run({ ids_json })
+    },
+    listRecentCompletions(limit: number): RecentCompletionRow[] {
+      return selectRecent.all({ limit }) as RecentCompletionRow[]
+    },
+  }
+}

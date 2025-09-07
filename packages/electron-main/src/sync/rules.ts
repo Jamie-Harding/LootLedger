@@ -1,5 +1,7 @@
 // sync/rules.ts
 
+import { parseTickTickDate } from './ticktickDate'
+
 // Minimal shape we need from TickTick "changes".
 // Add fields as you integrate the real API.
 export type TickTickChange = {
@@ -18,8 +20,7 @@ function toEpochMs(v?: string | number | Date): number {
   if (v == null) return Date.now()
   if (typeof v === 'number') return v
   if (v instanceof Date) return v.getTime()
-  const n = Date.parse(v)
-  return Number.isNaN(n) ? Date.now() : n
+  return parseTickTickDate(v) ?? Date.now()
 }
 
 // Map TickTick events → transaction drafts for the DB layer.

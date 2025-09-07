@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('rules', rulesAPI)
 contextBridge.exposeInMainWorld('lootDb', {
   getBalance: () => ipcRenderer.invoke('db:getBalance'),
   insertTest: (amount?: number) => ipcRenderer.invoke('db:insertTest', amount),
+  debug: {
+    checkTables: () => ipcRenderer.invoke('debug:checkTables'),
+  },
 })
 
 contextBridge.exposeInMainWorld('oauth', {

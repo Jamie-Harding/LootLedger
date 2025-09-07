@@ -150,6 +150,9 @@ declare global {
     lootDb: {
       getBalance(): Promise<number>
       insertTest(amount?: number): Promise<string>
+      debug?: {
+        checkTables: () => Promise<string[]>
+      }
     }
     oauth: {
       start(): Promise<void>
@@ -490,9 +493,6 @@ function App() {
       }
       await refreshAuthAndSyncStatus()
       await refreshBalance()
-      // Refresh mirror data after sync
-      await loadCompletions()
-      await loadOpenTasks()
     } finally {
       setSyncBusy(false)
     }
@@ -500,9 +500,11 @@ function App() {
 
   // M3 mirror data actions
   const loadCompletions = React.useCallback(async () => {
+    console.log('[renderer] Loading completions...')
     setLoadingCompletions(true)
     try {
-      const data = await window.completions.recent(20)
+      const data = await window.completions.recent(50)
+      console.info('[renderer] completions rows:', data.length)
       setCompletions(data)
     } catch (error) {
       console.error('Failed to load completions:', error)
@@ -512,9 +514,11 @@ function App() {
   }, [])
 
   const loadOpenTasks = React.useCallback(async () => {
+    console.log('[renderer] Loading open tasks...')
     setLoadingOpenTasks(true)
     try {
       const data = await window.openTasks.list()
+      console.info('[renderer] open rows received')
       setOpenTasks(data)
     } catch (error) {
       console.error('Failed to load open tasks:', error)
@@ -530,6 +534,14 @@ function App() {
     void loadCompletions()
     void loadOpenTasks()
   }, [refreshBalance, refreshAuthAndSyncStatus, loadCompletions, loadOpenTasks])
+
+  // Refresh mirror data after successful sync
+  React.useEffect(() => {
+    if (lastSync && Number(lastSync) > 0) {
+      void loadCompletions()
+      void loadOpenTasks()
+    }
+  }, [lastSync, loadCompletions, loadOpenTasks])
 
   // Subscribe to sync status push from main (updates Last Sync + balance immediately)
   React.useEffect(() => {
@@ -729,13 +741,38 @@ function App() {
             </table>
           </div>
         )}
-        <button
-          onClick={loadCompletions}
-          disabled={loadingCompletions}
-          style={{ padding: '8px 12px', borderRadius: 8, marginTop: 8 }}
-        >
-          {loadingCompletions ? 'Loading...' : 'Refresh Completions'}
-        </button>
+        <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+          <button
+            onClick={loadCompletions}
+            disabled={loadingCompletions}
+            style={{ padding: '8px 12px', borderRadius: 8 }}
+          >
+            {loadingCompletions ? 'Loading...' : 'Refresh Completions'}
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                const tables =
+                  (await window.lootDb.debug?.checkTables?.()) ||
+                  'Not available'
+                console.log('Available tables:', tables)
+                alert(
+                  `Available tables: ${Array.isArray(tables) ? tables.join(', ') : tables}`,
+                )
+              } catch (error) {
+                console.error('Debug check failed:', error)
+                alert('Debug check failed: ' + error)
+              }
+            }}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              backgroundColor: '#f0f0f0',
+            }}
+          >
+            Debug Tables
+          </button>
+        </div>
       </section>
 
       <section

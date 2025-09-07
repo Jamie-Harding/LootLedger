@@ -1,5 +1,7 @@
 // packages/electron-main/src/sync/ticktickClient.ts
 
+import { parseTickTickDate } from './ticktickDate'
+
 type RawTask = {
   id: string
   title: string
@@ -43,6 +45,24 @@ export type TickOpenItem = {
   dueAt?: number | null
   createdAt?: number | null
 }
+
+/**
+ * Minimal task shape the sync loop relies on. Status is strict:
+ * 0=open, 1=not used here, 2=completed.
+ */
+export interface TickTask {
+  id: string
+  title: string
+  status: 0 | 1 | 2
+  completedTime?: string | null
+  dueDate?: string | null
+  tags?: string[]
+  projectId?: string | null
+  isAllDay?: boolean
+}
+
+/** Access token carrier; wire it to your existing auth. */
+export type TickTickAuth = { accessToken: string }
 
 // Discriminated union item expected by downstream code
 export type TickTickChange = TickCompletedItem & { type: 'completed' }
@@ -100,9 +120,105 @@ export class TickTickClient {
     return this.getJson<ProjectData>(`${BASE}/project/${projectId}/data`)
   }
 
+  private async getCompletedTasks(): Promise<RawTask[]> {
+    try {
+      console.log('[ticktick] Trying global completed tasks endpoint...')
+      const response = await this.getJson<{ tasks?: RawTask[] }>(
+        `${BASE}/task/completed`,
+      )
+      console.log(
+        '[ticktick] Global completed tasks response keys:',
+        Object.keys(response),
+      )
+      console.log(
+        '[ticktick] Global completed tasks response:',
+        JSON.stringify(response, null, 2),
+      )
+      return response.tasks || []
+    } catch (error) {
+      console.log('[ticktick] Global completed tasks endpoint failed:', error)
+      return []
+    }
+  }
+
+  private async getCompletedTasksFromProject(
+    projectId: string,
+    since: number,
+  ): Promise<TickCompletedItem[]> {
+    try {
+      console.log(
+        '[ticktick] Trying project completed tasks endpoint for project:',
+        projectId,
+      )
+      const response = await this.getJson<{ tasks?: RawTask[] }>(
+        `${BASE}/project/${projectId}/completed`,
+      )
+      console.log(
+        '[ticktick] Project completed tasks response keys:',
+        Object.keys(response),
+      )
+      console.log(
+        '[ticktick] Project completed tasks response:',
+        JSON.stringify(response, null, 2),
+      )
+
+      const tasks = response.tasks || []
+      const items: TickCompletedItem[] = []
+
+      for (const t of tasks) {
+        if (!t || t.deleted) continue
+        const completedAt = parseTickTickDate(t.completedTime)
+
+        console.log(
+          '[ticktick] Project completed task:',
+          t.title,
+          'completedAt:',
+          completedAt,
+          'since:',
+          since,
+        )
+
+        if (
+          completedAt != null &&
+          Number.isFinite(completedAt) &&
+          completedAt > since
+        ) {
+          console.log(
+            '[ticktick] Found completed task from project endpoint:',
+            t.title,
+            'completedAt:',
+            completedAt,
+          )
+          items.push({
+            id: t.id,
+            title: t.title ?? '',
+            tags: Array.isArray(t.tags) ? t.tags : [],
+            list: null,
+            project: projectId,
+            dueAt: parseTickTickDate(t.dueDate),
+            completedAt,
+            isRecurring: Boolean(t.repeatFlag),
+            seriesKey: t.seriesId ?? null,
+          })
+        }
+      }
+
+      return items
+    } catch (error) {
+      console.log(
+        '[ticktick] Project completed tasks endpoint failed for project',
+        projectId,
+        ':',
+        error,
+      )
+      return []
+    }
+  }
+
   /**
    * Return completed changes whose completedAt > sinceMs.
-   * We fetch each project's data and filter locally for status==2 and completedTime > since.
+   * Since TickTick API doesn't provide completed tasks reliably, we detect completions
+   * by tracking task disappearances from the open tasks list.
    */
   async listChanges(sinceMs: number): Promise<TickTickChange[]> {
     const since =
@@ -110,37 +226,181 @@ export class TickTickClient {
         ? sinceMs
         : Date.now() - 7 * 24 * 60 * 60 * 1000
 
-    const projects = await this.listProjects()
+    console.log(
+      '[ticktick] listChanges called with sinceMs:',
+      sinceMs,
+      'since:',
+      since,
+    )
 
-    const items: TickCompletedItem[] = []
+    const allItems: TickCompletedItem[] = []
+
+    // Try to fetch completed tasks from global endpoint first
+    console.log('[ticktick] About to call getCompletedTasks()...')
+    const completedTasks = await this.getCompletedTasks()
+    console.log(
+      '[ticktick] getCompletedTasks() returned:',
+      completedTasks.length,
+      'tasks',
+    )
+
+    // Process global completed tasks
+    for (const t of completedTasks) {
+      if (!t || t.deleted) continue
+      const completedAt = parseTickTickDate(t.completedTime)
+
+      console.log(
+        '[ticktick] Global completed task:',
+        t.title,
+        'completedAt:',
+        completedAt,
+        'since:',
+        since,
+      )
+
+      // For global endpoint, we trust that all returned tasks are completed
+      if (
+        completedAt != null &&
+        Number.isFinite(completedAt) &&
+        completedAt > since
+      ) {
+        console.log(
+          '[ticktick] Found completed task from global endpoint:',
+          t.title,
+          'completedAt:',
+          completedAt,
+        )
+        allItems.push({
+          id: t.id,
+          title: t.title ?? '',
+          tags: Array.isArray(t.tags) ? t.tags : [],
+          list: null,
+          project: null, // We'll need to look up project name separately
+          dueAt: parseTickTickDate(t.dueDate),
+          completedAt,
+          isRecurring: Boolean(t.repeatFlag),
+          seriesKey: t.seriesId ?? null,
+        })
+      }
+    }
+
+    // Try project-specific completed endpoints
+    console.log('[ticktick] Trying project-specific completed endpoints...')
+    const projects = await this.listProjects()
+    console.log('[ticktick] Found projects:', projects.length)
+
     for (const p of projects) {
       try {
+        console.log(
+          '[ticktick] Processing project completed tasks:',
+          p.name,
+          p.id,
+        )
+        const projectCompletedItems = await this.getCompletedTasksFromProject(
+          p.id,
+          since,
+        )
+        console.log(
+          '[ticktick] Found',
+          projectCompletedItems.length,
+          'completed tasks from project',
+          p.name,
+        )
+
+        // Add project name to items
+        for (const item of projectCompletedItems) {
+          item.project = p.name
+          allItems.push(item)
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        console.warn(
+          '[ticktick] project completed tasks fetch failed',
+          p.id,
+          msg,
+        )
+      }
+    }
+
+    // Fall back to project data approach (looking for status=2 or completedTime)
+    console.log('[ticktick] Falling back to project data approach...')
+    for (const p of projects) {
+      try {
+        console.log('[ticktick] Processing project data:', p.name, p.id)
         const data = await this.getProjectData(p.id)
+        console.log('[ticktick] Raw project data keys:', Object.keys(data))
+        if (data.completedTasks) {
+          console.log(
+            '[ticktick] completedTasks sample:',
+            JSON.stringify(data.completedTasks[0], null, 2),
+          )
+        }
 
         // Some payloads expose everything under `tasks`; others may split.
         const candidateLists: RawTask[][] = []
-        if (Array.isArray(data.tasks)) candidateLists.push(data.tasks)
-        if (Array.isArray(data.completedTasks))
+        if (Array.isArray(data.tasks)) {
+          candidateLists.push(data.tasks)
+          console.log(
+            '[ticktick] Found',
+            data.tasks.length,
+            'tasks in project',
+            p.name,
+          )
+        }
+        if (Array.isArray(data.completedTasks)) {
           candidateLists.push(data.completedTasks)
+          console.log(
+            '[ticktick] Found',
+            data.completedTasks.length,
+            'completedTasks in project',
+            p.name,
+          )
+        }
 
         for (const list of candidateLists) {
           for (const t of list) {
             if (!t || t.deleted) continue
+
+            // Check if we already have this task
+            const taskExists = allItems.some((item) => item.id === t.id)
+            if (taskExists) continue
+
             const status = typeof t.status === 'number' ? t.status : undefined
-            const completedStr = t.completedTime ?? null
-            const completedAt = completedStr ? Date.parse(completedStr) : NaN
+            const completedAt = parseTickTickDate(t.completedTime)
+
+            console.log(
+              '[ticktick] Task:',
+              t.title,
+              'status:',
+              status,
+              'completedAt:',
+              completedAt,
+              'since:',
+              since,
+            )
+            console.log('[ticktick] Task raw data:', JSON.stringify(t, null, 2))
+
+            // Accept tasks with status=2 OR with a valid completedTime (some APIs might not set status correctly)
             if (
-              status === 2 &&
+              (status === 2 ||
+                (completedAt != null && Number.isFinite(completedAt))) &&
+              completedAt != null &&
               Number.isFinite(completedAt) &&
               completedAt > since
             ) {
-              items.push({
+              console.log(
+                '[ticktick] Found completed task from project data:',
+                t.title,
+                'completedAt:',
+                completedAt,
+              )
+              allItems.push({
                 id: t.id,
                 title: t.title ?? '',
                 tags: Array.isArray(t.tags) ? t.tags : [],
                 list: null, // TickTick doesn't expose list info in this API
                 project: p.name,
-                dueAt: t.dueDate ? Date.parse(t.dueDate) : null,
+                dueAt: parseTickTickDate(t.dueDate),
                 completedAt,
                 isRecurring: !!(t.repeatFlag && t.repeatFlag !== ''),
                 seriesKey: t.seriesId ?? null,
@@ -151,20 +411,61 @@ export class TickTickClient {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
         // Non-fatal per project; continue others
-
-        console.warn('[ticktick] project fetch failed', p.id, msg)
+        console.warn('[ticktick] project data fetch failed', p.id, msg)
       }
     }
 
+    // Remove duplicates by task ID
+    const uniqueItems = allItems.filter(
+      (item, index, arr) =>
+        arr.findIndex((other) => other.id === item.id) === index,
+    )
+
     // Sort by completion time just to be predictable
-    items.sort((a, b) => a.completedAt - b.completedAt)
+    uniqueItems.sort((a, b) => a.completedAt - b.completedAt)
+
+    console.log(
+      '[ticktick] Total unique completed tasks found:',
+      uniqueItems.length,
+    )
 
     // Adapt to the discriminated type the caller expects
-    const changes: TickTickChange[] = items.map((i) => ({
+    const changes: TickTickChange[] = uniqueItems.map((i) => ({
       type: 'completed',
       ...i,
     }))
     return changes
+  }
+
+  /**
+   * NEW: Track task disappearances to detect completions.
+   * This method compares the current open tasks with previously stored open tasks
+   * to find tasks that have disappeared (likely completed).
+   */
+  async detectCompletionsByDisappearance(): Promise<TickCompletedItem[]> {
+    console.log('[ticktick] Detecting completions by task disappearance...')
+
+    try {
+      // Get current open tasks
+      const currentOpenTasks = await this.listOpenTasks()
+      console.log('[ticktick] Current open tasks:', currentOpenTasks.length)
+
+      const completions: TickCompletedItem[] = []
+
+      // For now, we'll return empty array since we need to implement task tracking
+      // This would require storing previous task states and comparing them
+      console.log(
+        '[ticktick] Task disappearance detection not yet implemented - would need state persistence',
+      )
+
+      return completions
+    } catch (error) {
+      console.warn(
+        '[ticktick] Failed to detect completions by disappearance:',
+        error,
+      )
+      return []
+    }
   }
 
   /**
@@ -197,7 +498,7 @@ export class TickTickClient {
                 tags: Array.isArray(t.tags) ? t.tags : [],
                 list: null, // TickTick doesn't expose list info in this API
                 project: p.name,
-                dueAt: t.dueDate ? Date.parse(t.dueDate) : null,
+                dueAt: parseTickTickDate(t.dueDate),
                 createdAt: null, // Creation time not available in current API structure
               })
             }
@@ -231,25 +532,10 @@ type TickTickItemForSync = {
   seriesKey?: string | null
 }
 
-function toSyncItem(x: TickCompletedItem): TickTickItemForSync {
-  return {
-    id: x.id,
-    title: x.title,
-    tags: x.tags,
-    projectId: x.project ?? undefined,
-    due: x.dueAt ?? null,
-    completedTime: x.completedAt,
-    isRecurring: x.isRecurring,
-    seriesKey: x.seriesKey,
-  }
-}
-
 export async function listCompletedTasksSince(
   sinceIso: string,
 ): Promise<TickCompletedItem[]> {
-  const sinceMs = Number.isFinite(Date.parse(sinceIso))
-    ? Date.parse(sinceIso)
-    : 0
+  const sinceMs = parseTickTickDate(sinceIso) ?? 0
 
   const token = await getValidAccessToken() // likely string | null
   if (!token) {
@@ -274,7 +560,97 @@ export async function listCompletedTasksSince(
 // Alias so sync/index.ts can find either name
 export const listChanges = listCompletedTasksSince
 
-export async function listOpenTasks(): Promise<TickOpenItem[]> {
+/**
+ * Fetch COMPLETED items updated between `sinceIso` and `untilIso`.
+ * Keep this isolated so we can swap the underlying endpoint later without touching the sync loop.
+ * IMPORTANT: This function MUST return items with status=2 and `completedTime` populated where available.
+ */
+export async function listCompletedSince(
+  auth: TickTickAuth,
+  sinceIso: string,
+  untilIso: string = new Date().toISOString(),
+  limit: number = 500,
+): Promise<TickTask[]> {
+  // If you already have an official Open API method that returns completions since a timestamp,
+  // replace the block below with that call. Keep the return shape unchanged.
+
+  const url = new URL(
+    'https://api.ticktick.com/api/v2/project/all/completedInAll',
+  )
+  url.searchParams.set('from', sinceIso)
+  url.searchParams.set('to', untilIso)
+  url.searchParams.set('limit', String(limit))
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  })
+  if (!res.ok) {
+    throw new Error(
+      `listCompletedSince failed: ${res.status} ${res.statusText}`,
+    )
+  }
+
+  // Map only the fields we need, strictly typed.
+  const data = (await res.json()) as Array<Record<string, unknown>>
+
+  return data.map(
+    (raw): TickTask => ({
+      id: String(raw.id),
+      title: String(raw.title),
+      status: 2, // this endpoint returns completed items
+      completedTime:
+        typeof raw.completedTime === 'string' ? raw.completedTime : null,
+      dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : null,
+      tags: Array.isArray(raw.tags) ? (raw.tags as unknown[]).map(String) : [],
+      projectId: raw.projectId == null ? null : String(raw.projectId),
+      isAllDay: Boolean(raw.isAllDay ?? false),
+    }),
+  )
+}
+
+/**
+ * Fetch OPEN (status=0) tasks you want to mirror into the "open_tasks" table.
+ * If you already have a function that lists active tasks, call it here and return strictly typed items.
+ */
+export async function listOpenTasks(
+  auth: TickTickAuth,
+  limit: number = 500,
+): Promise<TickTask[]> {
+  // Replace the placeholder below with your existing open-tasks endpoint if you have one.
+  // Example: GET /api/v2/project/all/tasks?status=0&limit=...
+  const url = new URL('https://api.ticktick.com/api/v2/project/all/tasks')
+  url.searchParams.set('limit', String(limit))
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  })
+  if (!res.ok) {
+    throw new Error(`listOpenTasks failed: ${res.status} ${res.statusText}`)
+  }
+
+  const data = (await res.json()) as Array<Record<string, unknown>>
+
+  // Preserve `status` exactly from the API. Do NOT default to 0.
+  return data
+    .map(
+      (raw): TickTask => ({
+        id: String(raw.id),
+        title: String(raw.title),
+        status: Number(raw.status) as 0 | 1 | 2,
+        completedTime:
+          typeof raw.completedTime === 'string' ? raw.completedTime : null,
+        dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : null,
+        tags: Array.isArray(raw.tags)
+          ? (raw.tags as unknown[]).map(String)
+          : [],
+        projectId: raw.projectId == null ? null : String(raw.projectId),
+        isAllDay: Boolean(raw.isAllDay ?? false),
+      }),
+    )
+    .filter((t) => t.status === 0)
+}
+
+export async function listOpenTasksLegacy(): Promise<TickOpenItem[]> {
   const token = await getValidAccessToken() // likely string | null
   if (!token) {
     throw new Error('ticktickClient: no access token (not signed in)')

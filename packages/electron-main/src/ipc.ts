@@ -5,6 +5,28 @@ import * as Auth from './auth'
 import { runOnce, getStatus, getRecentBuffer } from './sync'
 import { registerRulesIpc } from './ipc/rules'
 
+type CompletionRowDTO = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  completed_ts: number
+  is_recurring: boolean
+  series_key: string | null
+}
+
+type OpenRowDTO = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id: string | null
+  list: string | null
+  due_ts: number | null
+  created_ts: number | null
+}
+
 // Simple type guard
 function isFn(x: unknown): x is (...args: unknown[]) => unknown {
   return typeof x === 'function'
@@ -82,15 +104,79 @@ export function registerSyncIpc(): void {
   ipcMain.handle('sync:getRecent', () => getRecentBuffer())
 
   // Mirror data endpoints
-  ipcMain.handle(
-    'completions:recent',
-    (_e: IpcMainInvokeEvent, limit: number) => {
-      return Queries.listRecentCompletions(limit)
-    },
-  )
+  ipcMain.handle('completions:recent', (_evt, args: { limit?: number }) => {
+    const limit = Math.max(1, Math.min(500, Number(args?.limit ?? 20)))
+    const rows = Queries.listRecentCompletions(limit)
+    const result: CompletionRowDTO[] = rows.map((r) => ({
+      task_id: r.task_id,
+      title: r.title,
+      tags: r.tags,
+      project_id: r.project_id ?? null,
+      list: r.list ?? null,
+      due_ts: r.due_ts ?? null,
+      completed_ts: r.completed_ts,
+      is_recurring: r.is_recurring ?? false,
+      series_key: r.series_key ?? null,
+    }))
+    if (process.env.SYNC_TRACE === '1') {
+      console.info('[ipc] completions:recent result:', result.length, 'items')
+    }
+    return result
+  })
 
-  ipcMain.handle('open:list', () => {
-    return Queries.listOpenTasks()
+  ipcMain.handle('open:list', async () => {
+    const { openDb } = await import('./db/index')
+    const db = openDb()
+    const rows = db
+      .prepare(
+        `
+      SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts
+      FROM open_tasks
+      ORDER BY COALESCE(due_ts, 32503680000000) ASC, title ASC
+    `,
+      )
+      .all() as Array<{
+      task_id: string
+      title: string
+      tags_json: string
+      project_id: string | null
+      list: string | null
+      due_ts: number | null
+      created_ts: number | null
+    }>
+
+    const result: OpenRowDTO[] = rows.map((r) => ({
+      task_id: r.task_id,
+      title: r.title,
+      tags: JSON.parse(r.tags_json) as string[],
+      project_id: r.project_id,
+      list: r.list,
+      due_ts: r.due_ts,
+      created_ts: r.created_ts,
+    }))
+    if (process.env.SYNC_TRACE === '1') {
+      console.info('[ipc] open:list result:', result.length, 'items')
+    }
+    return result
+  })
+
+  // Debug endpoint to check table existence
+  ipcMain.handle('debug:checkTables', async () => {
+    try {
+      const { openDb } = await import('./db/index')
+      const db = openDb()
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .all()
+      console.log(
+        '[debug] Available tables:',
+        tables.map((t: { name: string }) => t.name),
+      )
+      return tables.map((t: { name: string }) => t.name)
+    } catch (error) {
+      console.error('[debug] Error checking tables:', error)
+      throw error
+    }
   })
 
   // Also register the Rules CRUD  Tester IPC here so main.ts doesn’t need to change

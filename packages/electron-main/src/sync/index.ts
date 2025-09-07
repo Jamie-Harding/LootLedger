@@ -2,6 +2,7 @@
 import { BrowserWindow } from 'electron'
 import { EventEmitter } from 'events'
 import * as Tick from './ticktickClient'
+import { parseTickTickDate } from './ticktickDate'
 import {
   listRules,
   getTagPriority,
@@ -11,6 +12,7 @@ import {
   upsertCompletedTask,
   upsertOpenTask,
   clearMissingOpenTasks,
+  listOpenTasks,
 } from '../db/queries'
 import { evaluateTask, type Rule } from '../rewards/evaluator'
 import type { TaskContext, TaskTransactionMetaV1 } from '../rewards/types'
@@ -107,12 +109,10 @@ function coerceDueTs(due: TickTickDue): number | undefined {
   if (due == null) return undefined
   if (typeof due === 'number' && Number.isFinite(due)) return due
   if (typeof due === 'string') {
-    const t = Date.parse(due)
-    return Number.isNaN(t) ? undefined : t
+    return parseTickTickDate(due) ?? undefined
   }
   if (typeof due === 'object' && typeof due.date === 'string') {
-    const t = Date.parse(due.date)
-    return Number.isNaN(t) ? undefined : t
+    return parseTickTickDate(due.date) ?? undefined
   }
   return undefined
 }
@@ -141,14 +141,6 @@ function emitOneShot(payload: SyncNowResult) {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('sync:status', payload)
   }
-}
-
-function isDueObj(v: unknown): v is { ts?: number | null } {
-  return (
-    typeof v === 'object' &&
-    v !== null &&
-    'ts' in (v as Record<string, unknown>)
-  )
 }
 
 function computeBackoffMs(): number {
@@ -196,26 +188,6 @@ type SyncNowResult =
   | { ok: true; at: number; added: number }
   | { ok: false; error: string }
 
-// ---------- Build evaluator context ----------
-function toTaskContext(it: TickTickItem): TaskContext {
-  const completedAt =
-    typeof it.completedTime === 'number'
-      ? it.completedTime
-      : typeof it.completedTime === 'string'
-        ? Date.parse(it.completedTime)
-        : Date.now()
-
-  return {
-    id: it.id,
-    title: it.title ?? '',
-    tags: Array.isArray(it.tags) ? it.tags : [],
-    list: undefined,
-    project: it.projectId ?? null,
-    completedAt,
-    dueAt: coerceDueTs(it.due) ?? null,
-  }
-}
-
 // ---------- Core: one sync tick ----------
 export async function runOnce(): Promise<SyncNowResult> {
   const lastSyncRaw = getState('last_sync_at')
@@ -226,7 +198,77 @@ export async function runOnce(): Promise<SyncNowResult> {
 
   try {
     // 1) Pull changed/completed tasks
+    console.log('[sync] Fetching completed tasks since:', sinceIso)
     const items = await listSince(sinceIso)
+    console.log('[sync] Fetched completed items:', items.length, 'items')
+
+    // Log some details about the fetched items for debugging
+    if (items.length > 0) {
+      console.log('[sync] Sample of fetched items:')
+      items.slice(0, 3).forEach((item, index) => {
+        console.log(`[sync] Item ${index + 1}:`, {
+          id: item.id,
+          title: item.title,
+          completedTime: item.completedTime,
+          tags: item.tags,
+        })
+      })
+    }
+
+    // 1.1) DETECT COMPLETIONS BY TASK DISAPPEARANCE
+    // Since TickTick API doesn't provide completed tasks, we detect them by comparing
+    // the current open tasks with previously stored open tasks
+    console.log('[sync] Detecting completions by task disappearance...')
+    const currentOpenTasks = await Tick.listOpenTasksLegacy()
+    console.log('[sync] Current open tasks:', currentOpenTasks.length)
+
+    // Get previously stored open tasks from database
+    const previousOpenTasks = listOpenTasks()
+    console.log(
+      '[sync] Previously stored open tasks:',
+      previousOpenTasks.length,
+    )
+
+    // Find tasks that were open before but are not open now (likely completed)
+    const disappearedTasks = previousOpenTasks.filter(
+      (prevTask) =>
+        !currentOpenTasks.some(
+          (currentTask) => currentTask.id === prevTask.task_id,
+        ),
+    )
+
+    console.log(
+      '[sync] Found',
+      disappearedTasks.length,
+      'disappeared tasks (likely completed)',
+    )
+
+    // Convert disappeared tasks to completion items and add to items array
+    for (const disappearedTask of disappearedTasks) {
+      console.log(
+        '[sync] Processing disappeared task:',
+        disappearedTask.title,
+        disappearedTask.task_id,
+      )
+
+      // Create a completion item for the disappeared task
+      const completionItem = {
+        id: disappearedTask.task_id,
+        title: disappearedTask.title,
+        tags: disappearedTask.tags, // tags is already parsed as string[]
+        projectId: disappearedTask.project_id ?? undefined,
+        due: disappearedTask.due_ts,
+        completedTime: Date.now(), // Use current time as completion time
+        isRecurring: false, // We don't have this info for disappeared tasks
+        seriesKey: null,
+      }
+
+      console.log(
+        '[sync] Adding disappeared task as completion:',
+        completionItem.title,
+      )
+      items.push(completionItem)
+    }
 
     if (SYNC_TRACE)
       console.info('[sync] fetched completed items =', items.length)
@@ -238,14 +280,40 @@ export async function runOnce(): Promise<SyncNowResult> {
     // 2) Filter to truly-new completions, evaluate, and (optionally) insert tx
     let newCount = 0
     let processed = 0
+    console.log(
+      '[sync] Processing',
+      items.length,
+      'items for task evaluation...',
+    )
+
     for (const it of items) {
       const taskId = it.id
       const completedTs =
         typeof it.completedTime === 'number' ? it.completedTime : 0
-      if (!taskId || !completedTs) continue
+
+      console.log('[sync] Processing task:', {
+        id: taskId,
+        title: it.title,
+        completedTime: it.completedTime,
+        completedTs,
+        hasValidId: !!taskId,
+        hasValidCompletedTs: !!completedTs,
+      })
+
+      if (!taskId || !completedTs) {
+        console.log(
+          '[sync] Skipping task due to missing id or completedTs:',
+          taskId,
+          completedTs,
+        )
+        continue
+      }
 
       const k = key(taskId, completedTs)
-      if (seen.has(k)) continue
+      if (seen.has(k)) {
+        console.log('[sync] Skipping already seen task:', k)
+        continue
+      }
       seen.add(k)
 
       const rc: RecentCompletion = {
@@ -319,15 +387,29 @@ export async function runOnce(): Promise<SyncNowResult> {
 
       pushRecent(rc)
       newCount++
+
+      console.log('[sync] Successfully processed task:', {
+        id: taskId,
+        title: it.title,
+        completedTs,
+        newCount,
+        processed,
+      })
     }
 
+    console.log(
+      '[sync] Task processing complete. Processed:',
+      processed,
+      'New:',
+      newCount,
+    )
     if (SYNC_TRACE) console.info('[sync] processed =', processed)
 
     if (newCount > 0) broadcastRecent()
 
     // Mirror open tasks
     try {
-      const open = await Tick.listOpenTasks()
+      const open = await Tick.listOpenTasksLegacy()
       for (const o of open) {
         upsertOpenTask({
           task_id: o.id,
