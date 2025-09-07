@@ -22,19 +22,20 @@ type ProjectData = {
   [k: string]: unknown
 }
 
-export type CompletedItem = {
+export type TickCompletedItem = {
   id: string
   title: string
   tags: string[]
-  projectId: string
-  due_ts: number | null
-  completed_ts: number
-  is_recurring: boolean
-  series_key: string | null
+  list?: string | null
+  project?: string | null
+  dueAt?: number | null // epoch ms (nullable)
+  completedAt: number // epoch ms
+  isRecurring?: boolean
+  seriesKey?: string | null
 }
 
 // Discriminated union item expected by downstream code
-export type TickTickChange = CompletedItem & { type: 'completed' }
+export type TickTickChange = TickCompletedItem & { type: 'completed' }
 
 const BASE = 'https://api.ticktick.com/open/v1'
 
@@ -90,7 +91,7 @@ export class TickTickClient {
   }
 
   /**
-   * Return completed changes whose completed_ts > sinceMs.
+   * Return completed changes whose completedAt > sinceMs.
    * We fetch each project's data and filter locally for status==2 and completedTime > since.
    */
   async listChanges(sinceMs: number): Promise<TickTickChange[]> {
@@ -101,7 +102,7 @@ export class TickTickClient {
 
     const projects = await this.listProjects()
 
-    const items: CompletedItem[] = []
+    const items: TickCompletedItem[] = []
     for (const p of projects) {
       try {
         const data = await this.getProjectData(p.id)
@@ -117,21 +118,22 @@ export class TickTickClient {
             if (!t || t.deleted) continue
             const status = typeof t.status === 'number' ? t.status : undefined
             const completedStr = t.completedTime ?? null
-            const completed_ts = completedStr ? Date.parse(completedStr) : NaN
+            const completedAt = completedStr ? Date.parse(completedStr) : NaN
             if (
               status === 2 &&
-              Number.isFinite(completed_ts) &&
-              completed_ts > since
+              Number.isFinite(completedAt) &&
+              completedAt > since
             ) {
               items.push({
                 id: t.id,
                 title: t.title ?? '',
                 tags: Array.isArray(t.tags) ? t.tags : [],
-                projectId: t.projectId ?? p.id,
-                due_ts: t.dueDate ? Date.parse(t.dueDate) : null,
-                completed_ts,
-                is_recurring: !!(t.repeatFlag && t.repeatFlag !== ''),
-                series_key: t.seriesId ?? null,
+                list: null, // TickTick doesn't expose list info in this API
+                project: p.name,
+                dueAt: t.dueDate ? Date.parse(t.dueDate) : null,
+                completedAt,
+                isRecurring: !!(t.repeatFlag && t.repeatFlag !== ''),
+                seriesKey: t.seriesId ?? null,
               })
             }
           }
@@ -145,7 +147,7 @@ export class TickTickClient {
     }
 
     // Sort by completion time just to be predictable
-    items.sort((a, b) => a.completed_ts - b.completed_ts)
+    items.sort((a, b) => a.completedAt - b.completedAt)
 
     // Adapt to the discriminated type the caller expects
     const changes: TickTickChange[] = items.map((i) => ({
@@ -170,22 +172,22 @@ type TickTickItemForSync = {
   seriesKey?: string | null
 }
 
-function toSyncItem(x: CompletedItem): TickTickItemForSync {
+function toSyncItem(x: TickCompletedItem): TickTickItemForSync {
   return {
     id: x.id,
     title: x.title,
     tags: x.tags,
-    projectId: x.projectId,
-    due: x.due_ts ?? null,
-    completedTime: x.completed_ts,
-    isRecurring: x.is_recurring,
-    seriesKey: x.series_key,
+    projectId: x.project ?? undefined,
+    due: x.dueAt ?? null,
+    completedTime: x.completedAt,
+    isRecurring: x.isRecurring,
+    seriesKey: x.seriesKey,
   }
 }
 
-export async function listChanges(
+export async function listCompletedTasksSince(
   sinceIso: string,
-): Promise<TickTickItemForSync[]> {
+): Promise<TickCompletedItem[]> {
   const sinceMs = Number.isFinite(Date.parse(sinceIso))
     ? Date.parse(sinceIso)
     : 0
@@ -196,9 +198,19 @@ export async function listChanges(
   }
 
   const client = new TickTickClient(token)
-  const changes = await client.listChanges(sinceMs) // CompletedItem[]
-  return changes.map(toSyncItem)
+  const changes = await client.listChanges(sinceMs) // TickCompletedItem[]
+  return changes.map((change) => ({
+    id: change.id,
+    title: change.title,
+    tags: change.tags,
+    list: change.list,
+    project: change.project,
+    dueAt: change.dueAt,
+    completedAt: change.completedAt,
+    isRecurring: change.isRecurring,
+    seriesKey: change.seriesKey,
+  }))
 }
 
 // Alias so sync/index.ts can find either name
-export const listCompletedTasksSince = listChanges
+export const listChanges = listCompletedTasksSince
