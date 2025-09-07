@@ -1,6 +1,18 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 
+// Extend Window interface for new mirror data APIs
+declare global {
+  interface Window {
+    completions: {
+      recent: (limit: number) => Promise<CompletionRow[]>
+    }
+    openTasks: {
+      list: () => Promise<OpenRow[]>
+    }
+  }
+}
+
 type AuthStatus = 'signed_in' | 'signed_out' | 'error'
 
 type RuleDTO = {
@@ -20,6 +32,28 @@ type RuleDTO = {
 }
 
 type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number }
+
+type CompletionRow = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  completed_ts: number
+  is_recurring?: boolean
+  series_key?: string | null
+}
+
+type OpenRow = {
+  task_id: string
+  title: string
+  tags: string[]
+  project_id?: string | null
+  list?: string | null
+  due_ts?: number | null
+  created_ts?: number | null
+}
 
 function formatRuleScope(scope: RuleDTO['scope']): string {
   switch (scope.kind) {
@@ -411,6 +445,12 @@ function App() {
   const [lastSync, setLastSync] = React.useState<string | null>(null)
   const [syncBusy, setSyncBusy] = React.useState(false)
 
+  // M3 mirror data state
+  const [completions, setCompletions] = React.useState<CompletionRow[]>([])
+  const [openTasks, setOpenTasks] = React.useState<OpenRow[]>([])
+  const [loadingCompletions, setLoadingCompletions] = React.useState(false)
+  const [loadingOpenTasks, setLoadingOpenTasks] = React.useState(false)
+
   // M1 actions
   const refreshBalance = React.useCallback(async () => {
     const b = await window.lootDb.getBalance()
@@ -450,16 +490,46 @@ function App() {
       }
       await refreshAuthAndSyncStatus()
       await refreshBalance()
+      // Refresh mirror data after sync
+      await loadCompletions()
+      await loadOpenTasks()
     } finally {
       setSyncBusy(false)
     }
   }, [refreshAuthAndSyncStatus, refreshBalance])
 
+  // M3 mirror data actions
+  const loadCompletions = React.useCallback(async () => {
+    setLoadingCompletions(true)
+    try {
+      const data = await window.completions.recent(20)
+      setCompletions(data)
+    } catch (error) {
+      console.error('Failed to load completions:', error)
+    } finally {
+      setLoadingCompletions(false)
+    }
+  }, [])
+
+  const loadOpenTasks = React.useCallback(async () => {
+    setLoadingOpenTasks(true)
+    try {
+      const data = await window.openTasks.list()
+      setOpenTasks(data)
+    } catch (error) {
+      console.error('Failed to load open tasks:', error)
+    } finally {
+      setLoadingOpenTasks(false)
+    }
+  }, [])
+
   // Initial load
   React.useEffect(() => {
     void refreshBalance()
     void refreshAuthAndSyncStatus()
-  }, [refreshBalance, refreshAuthAndSyncStatus])
+    void loadCompletions()
+    void loadOpenTasks()
+  }, [refreshBalance, refreshAuthAndSyncStatus, loadCompletions, loadOpenTasks])
 
   // Subscribe to sync status push from main (updates Last Sync + balance immediately)
   React.useEffect(() => {
@@ -560,6 +630,208 @@ function App() {
           </p>
         </div>
       </section>
+
+      {/* M3 mirror data panels */}
+      <section
+        style={{
+          border: '1px solid #ddd',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 16,
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Recent Completions</h2>
+        {loadingCompletions ? (
+          <p>Loading completions...</p>
+        ) : completions.length === 0 ? (
+          <p>No recent completions found.</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '14px',
+              }}
+            >
+              <thead>
+                <tr style={{ backgroundColor: '#f5f5f5' }}>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Title
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Tags
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Due
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Completed
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Project
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {completions.map((completion) => (
+                  <tr key={`${completion.task_id}-${completion.completed_ts}`}>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {completion.title}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {completion.tags.join(', ') || '—'}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {completion.due_ts
+                        ? new Date(completion.due_ts).toLocaleDateString()
+                        : '—'}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {new Date(completion.completed_ts).toLocaleString()}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {completion.project_id || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <button
+          onClick={loadCompletions}
+          disabled={loadingCompletions}
+          style={{ padding: '8px 12px', borderRadius: 8, marginTop: 8 }}
+        >
+          {loadingCompletions ? 'Loading...' : 'Refresh Completions'}
+        </button>
+      </section>
+
+      <section
+        style={{
+          border: '1px solid #ddd',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 16,
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Open Tasks</h2>
+        {loadingOpenTasks ? (
+          <p>Loading open tasks...</p>
+        ) : openTasks.length === 0 ? (
+          <p>No open tasks found.</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table
+              style={{
+                width: '100%',
+                borderCollapse: 'collapse',
+                fontSize: '14px',
+              }}
+            >
+              <thead>
+                <tr style={{ backgroundColor: '#f5f5f5' }}>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Title
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Tags
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Due
+                  </th>
+                  <th
+                    style={{
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: '1px solid #ddd',
+                    }}
+                  >
+                    Project
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {openTasks.map((task) => (
+                  <tr key={task.task_id}>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {task.title}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {task.tags.join(', ') || '—'}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {task.due_ts
+                        ? new Date(task.due_ts).toLocaleDateString()
+                        : '—'}
+                    </td>
+                    <td style={{ padding: '8px', border: '1px solid #ddd' }}>
+                      {task.project_id || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <button
+          onClick={loadOpenTasks}
+          disabled={loadingOpenTasks}
+          style={{ padding: '8px 12px', borderRadius: 8, marginTop: 8 }}
+        >
+          {loadingOpenTasks ? 'Loading...' : 'Refresh Open Tasks'}
+        </button>
+      </section>
+
       {/* M4 panels (INSERTED HERE) */}
       <div style={{ marginTop: 16, display: 'grid', gap: 16 }}>
         <RulesPanel />
