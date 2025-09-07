@@ -56,9 +56,13 @@ export interface TickTask {
   status: 0 | 1 | 2
   completedTime?: string | null
   dueDate?: string | null
+  startDate?: string | null
   tags?: string[]
   projectId?: string | null
   isAllDay?: boolean
+  etag?: string | null
+  sortOrder?: number | null
+  updatedTime?: string | null
 }
 
 /** Access token carrier; wire it to your existing auth. */
@@ -66,6 +70,51 @@ export type TickTickAuth = { accessToken: string }
 
 // Discriminated union item expected by downstream code
 export type TickTickChange = TickCompletedItem & { type: 'completed' }
+
+type Raw = Record<string, unknown>
+
+function mapRawTask(raw: Raw): TickTask {
+  return {
+    id: String(raw.id),
+    title: String(raw.title),
+    status: Number(raw.status) as 0 | 1 | 2,
+    completedTime:
+      typeof raw.completedTime === 'string' ? raw.completedTime : null,
+    dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : null,
+    startDate: typeof raw.startDate === 'string' ? raw.startDate : null,
+    tags: Array.isArray(raw.tags) ? (raw.tags as unknown[]).map(String) : [],
+    projectId: raw.projectId == null ? null : String(raw.projectId),
+    isAllDay: Boolean(raw.isAllDay ?? false),
+    etag: typeof raw.etag === 'string' ? raw.etag : null,
+    sortOrder: typeof raw.sortOrder === 'number' ? raw.sortOrder : null,
+    updatedTime:
+      typeof (raw as { updatedTime?: unknown }).updatedTime === 'string'
+        ? String((raw as { updatedTime: string }).updatedTime)
+        : null,
+  }
+}
+
+async function httpJson(url: URL, auth: TickTickAuth): Promise<unknown> {
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    console.error(
+      '[ticktick][HTTP]',
+      res.status,
+      res.statusText,
+      'url=',
+      url.toString(),
+      'body=',
+      body.slice(0, 300),
+    )
+    const err = new Error(`HTTP_${res.status}`)
+    ;(err as { status?: number }).status = res.status
+    throw err
+  }
+  return res.json()
+}
 
 const BASE = 'https://api.ticktick.com/open/v1'
 
@@ -521,16 +570,16 @@ export class TickTickClient {
 // --- Adapters expected by sync/index.ts ---------------------------
 import { getValidAccessToken } from '../auth'
 
-type TickTickItemForSync = {
-  id: string
-  title?: string
-  tags?: string[]
-  projectId?: string
-  due?: number | { ts?: number | null } | null
-  completedTime?: number
-  isRecurring?: boolean
-  seriesKey?: string | null
-}
+// type TickTickItemForSync = {
+//   id: string
+//   title?: string
+//   tags?: string[]
+//   projectId?: string
+//   due?: number | { ts?: number | null } | null
+//   completedTime?: number
+//   isRecurring?: boolean
+//   seriesKey?: string | null
+// }
 
 export async function listCompletedTasksSince(
   sinceIso: string,
@@ -610,44 +659,81 @@ export async function listCompletedSince(
 
 /**
  * Fetch OPEN (status=0) tasks you want to mirror into the "open_tasks" table.
- * If you already have a function that lists active tasks, call it here and return strictly typed items.
+ * Uses Open API with pagination to get all open tasks.
  */
 export async function listOpenTasks(
   auth: TickTickAuth,
-  limit: number = 500,
+  limitPerPage: number = 200,
 ): Promise<TickTask[]> {
-  // Replace the placeholder below with your existing open-tasks endpoint if you have one.
-  // Example: GET /api/v2/project/all/tasks?status=0&limit=...
-  const url = new URL('https://api.ticktick.com/api/v2/project/all/tasks')
-  url.searchParams.set('limit', String(limit))
+  const seen = new Set<string>()
+  const items: TickTask[] = []
+  let page = 0
 
-  const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${auth.accessToken}` },
-  })
-  if (!res.ok) {
-    throw new Error(`listOpenTasks failed: ${res.status} ${res.statusText}`)
+  for (;;) {
+    // Use Open API base
+    const url = new URL('https://api.ticktick.com/open/v1/project/all/tasks')
+    url.searchParams.set('limit', String(limitPerPage))
+    url.searchParams.set('offset', String(page * limitPerPage))
+    url.searchParams.set('page', String(page + 1)) // defensive
+
+    const json = await httpJson(url, auth)
+    if (!Array.isArray(json)) break
+    const mapped = (json as Raw[]).map(mapRawTask).filter((t) => t.status === 0)
+
+    let added = 0
+    for (const t of mapped) {
+      if (seen.has(t.id)) continue
+      seen.add(t.id)
+      items.push(t)
+      added++
+    }
+
+    if (process.env.SYNC_TRACE === '1') {
+      console.info(
+        '[ticktick][open] page=',
+        page + 1,
+        'returned=',
+        (json as unknown[]).length,
+        'addedOpen=',
+        added,
+        'acc=',
+        items.length,
+      )
+    }
+
+    if ((json as unknown[]).length < limitPerPage || added === 0) break
+    page++
+    if (page > 1000) break
   }
+  return items
+}
 
-  const data = (await res.json()) as Array<Record<string, unknown>>
-
-  // Preserve `status` exactly from the API. Do NOT default to 0.
-  return data
-    .map(
-      (raw): TickTask => ({
-        id: String(raw.id),
-        title: String(raw.title),
-        status: Number(raw.status) as 0 | 1 | 2,
-        completedTime:
-          typeof raw.completedTime === 'string' ? raw.completedTime : null,
-        dueDate: typeof raw.dueDate === 'string' ? raw.dueDate : null,
-        tags: Array.isArray(raw.tags)
-          ? (raw.tags as unknown[]).map(String)
-          : [],
-        projectId: raw.projectId == null ? null : String(raw.projectId),
-        isAllDay: Boolean(raw.isAllDay ?? false),
-      }),
-    )
-    .filter((t) => t.status === 0)
+/**
+ * Fetch one task by project & task id via Open API.
+ * Returns:
+ *  - { ok: true, task } on 200
+ *  - { ok: false, status } on non-200 (e.g., 404 if not found/moved)
+ */
+export async function getTaskByProjectAndId(
+  auth: TickTickAuth,
+  projectId: string,
+  taskId: string,
+): Promise<{ ok: true; task: TickTask } | { ok: false; status: number }> {
+  const url = new URL(
+    `https://api.ticktick.com/open/v1/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}`,
+  )
+  try {
+    const json = await httpJson(url, auth)
+    const raw = json as Raw
+    const task = mapRawTask(raw)
+    return { ok: true, task }
+  } catch (e) {
+    const status =
+      typeof (e as { status?: number }).status === 'number'
+        ? (e as { status: number }).status
+        : 500
+    return { ok: false, status }
+  }
 }
 
 export async function listOpenTasksLegacy(): Promise<TickOpenItem[]> {

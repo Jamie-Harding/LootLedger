@@ -124,39 +124,44 @@ export function registerSyncIpc(): void {
   })
 
   ipcMain.handle('open:list', async () => {
-    const { openDb } = await import('./db/index')
-    const db = openDb()
-    const rows = db
-      .prepare(
-        `
-      SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts
-      FROM open_tasks
-      ORDER BY COALESCE(due_ts, 32503680000000) ASC, title ASC
-    `,
-      )
-      .all() as Array<{
-      task_id: string
-      title: string
-      tags_json: string
-      project_id: string | null
-      list: string | null
-      due_ts: number | null
-      created_ts: number | null
-    }>
+    try {
+      const { openDb } = await import('./db/index')
+      const db = openDb()
+      const rows = db
+        .prepare(
+          `
+        SELECT task_id, title, tags_json, project_id, list, due_ts, created_ts
+        FROM open_tasks
+        ORDER BY COALESCE(due_ts, 32503680000000) ASC, title ASC
+      `,
+        )
+        .all() as Array<{
+        task_id: string
+        title: string
+        tags_json: string
+        project_id: string | null
+        list: string | null
+        due_ts: number | null
+        created_ts: number | null
+      }>
 
-    const result: OpenRowDTO[] = rows.map((r) => ({
-      task_id: r.task_id,
-      title: r.title,
-      tags: JSON.parse(r.tags_json) as string[],
-      project_id: r.project_id,
-      list: r.list,
-      due_ts: r.due_ts,
-      created_ts: r.created_ts,
-    }))
-    if (process.env.SYNC_TRACE === '1') {
-      console.info('[ipc] open:list result:', result.length, 'items')
+      const result: OpenRowDTO[] = rows.map((r) => ({
+        task_id: r.task_id,
+        title: r.title,
+        tags: JSON.parse(r.tags_json) as string[],
+        project_id: r.project_id,
+        list: r.list,
+        due_ts: r.due_ts,
+        created_ts: r.created_ts,
+      }))
+      if (process.env.SYNC_TRACE === '1') {
+        console.info('[ipc] open:list result:', result.length, 'items')
+      }
+      return result
+    } catch (error) {
+      console.error('[ipc] open:list error:', error)
+      throw error
     }
-    return result
   })
 
   // Debug endpoint to check table existence
@@ -181,7 +186,23 @@ export function registerSyncIpc(): void {
     }
   })
 
-  // Also register the Rules CRUD  Tester IPC here so main.ts doesn’t need to change
+  // Debug endpoint to check open_tasks table
+  ipcMain.handle('debug:checkOpenTasks', async () => {
+    try {
+      const { openDb } = await import('./db/index')
+      const db = openDb()
+      const count = db
+        .prepare('SELECT COUNT(*) as count FROM open_tasks')
+        .get() as { count: number }
+      const sample = db.prepare('SELECT * FROM open_tasks LIMIT 3').all()
+      return { count: count.count, sample }
+    } catch (error) {
+      console.error('[ipc] debug:checkOpenTasks error:', error)
+      throw error
+    }
+  })
+
+  // Also register the Rules CRUD  Tester IPC here so main.ts doesn't need to change
   registerRulesIpc()
 }
 

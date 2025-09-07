@@ -151,8 +151,9 @@ declare global {
     lootDb: {
       getBalance(): Promise<number>
       insertTest(amount?: number): Promise<string>
-      debug?: {
+      debug: {
         checkTables: () => Promise<string[]>
+        checkOpenTasks: () => Promise<{ count: number; sample: OpenRow[] }>
       }
     }
     oauth: {
@@ -519,10 +520,14 @@ function App() {
     setLoadingOpenTasks(true)
     try {
       const data = await window.openTasks.list()
-      console.info('[renderer] open rows received')
+      console.info('[renderer] open rows received:', data.length, 'items')
       setOpenTasks(data)
     } catch (error) {
       console.error('Failed to load open tasks:', error)
+      // Show user-friendly error message
+      alert(
+        `Failed to load open tasks: ${error instanceof Error ? error.message : String(error)}`,
+      )
     } finally {
       setLoadingOpenTasks(false)
     }
@@ -867,6 +872,28 @@ function App() {
           style={{ padding: '8px 12px', borderRadius: 8, marginTop: 8 }}
         >
           {loadingOpenTasks ? 'Loading...' : 'Refresh Open Tasks'}
+        </button>
+        <button
+          onClick={async () => {
+            try {
+              const result = await window.lootDb.debug.checkOpenTasks()
+              console.log('Debug open_tasks:', result)
+              alert(
+                `Open tasks count: ${result.count}\nSample: ${JSON.stringify(result.sample, null, 2)}`,
+              )
+            } catch (error) {
+              console.error('Debug error:', error)
+              alert(`Debug error: ${error}`)
+            }
+          }}
+          style={{
+            padding: '8px 12px',
+            borderRadius: 8,
+            marginTop: 8,
+            marginLeft: 8,
+          }}
+        >
+          Debug Open Tasks
         </button>
       </section>
 

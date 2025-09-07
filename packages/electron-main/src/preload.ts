@@ -132,6 +132,7 @@ contextBridge.exposeInMainWorld('lootDb', {
   insertTest: (amount?: number) => ipcRenderer.invoke('db:insertTest', amount),
   debug: {
     checkTables: () => ipcRenderer.invoke('debug:checkTables'),
+    checkOpenTasks: () => ipcRenderer.invoke('debug:checkOpenTasks'),
   },
 })
 
