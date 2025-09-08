@@ -438,6 +438,8 @@ export async function runOnce(): Promise<SyncNowResult> {
       const t = res.task
       if (t.status === 2) {
         const apiCompletedTs = parseTickTickDate(t.completedTime ?? null)
+        const completed_ts = apiCompletedTs ?? now // prefer precise timestamp when available
+
         Q.upsertCompletedTask({
           task_id: prev.task_id,
           title: prev.title,
@@ -445,11 +447,81 @@ export async function runOnce(): Promise<SyncNowResult> {
           project_id: resolved.projectId,
           list: prev.list,
           due_ts: prev.due_ts,
-          completed_ts: apiCompletedTs ?? now, // prefer precise timestamp when available
+          completed_ts,
           is_recurring: 0,
           series_key: null,
           verified: 1,
         })
+
+        // Evaluate and create transaction
+        try {
+          const tags = JSON.parse(prev.tags_json) as string[]
+          const ctx: TaskContext = {
+            id: prev.task_id,
+            title: prev.title,
+            tags: Array.isArray(tags) ? tags : [],
+            list: prev.list,
+            project: resolved.projectId,
+            completedAt: completed_ts,
+            dueAt: prev.due_ts,
+          }
+
+          const breakdown = evaluateTask(ctx, rules, tagOrder)
+
+          const meta: TaskTransactionMetaV1 = {
+            kind: 'task_evaluated',
+            version: 1,
+            breakdown,
+            task: {
+              id: ctx.id,
+              title: ctx.title,
+              tags: ctx.tags,
+              list: ctx.list,
+              project: ctx.project,
+              completedAt: ctx.completedAt,
+              dueAt: ctx.dueAt,
+            },
+          }
+
+          // Insert the main transaction (pre-penalty for M4)
+          await insertTransaction({
+            id: randomUUID(),
+            created_at: completed_ts,
+            amount: breakdown.pointsPrePenalty,
+            source: 'ticktick',
+            reason: `Task "${ctx.title}"`,
+            metadata: JSON.stringify(meta),
+            related_task_id: ctx.id,
+          })
+
+          // Add to recent buffer
+          const rc: RecentCompletion = {
+            taskId: prev.task_id,
+            title: prev.title,
+            tags: ctx.tags,
+            projectId: resolved.projectId ?? undefined,
+            dueTs: prev.due_ts,
+            completedTs: completed_ts,
+            isRecurring: false,
+            seriesKey: null,
+          }
+          pushRecent(rc)
+
+          if (process.env.SYNC_TRACE === '1') {
+            console.info(
+              '[sync] wrote txn amount=%d for task=%s',
+              breakdown.pointsPrePenalty,
+              ctx.id,
+            )
+          }
+        } catch (e) {
+          console.warn(
+            '[sync] evaluation failed for completed task',
+            prev.task_id,
+            e,
+          )
+        }
+
         mirrored++
       } else {
         Q.insertRemovedTask({
@@ -551,8 +623,8 @@ export async function runOnce(): Promise<SyncNowResult> {
           id: randomUUID(),
           created_at: completed_ts,
           amount: breakdown.pointsPrePenalty,
-          source: 'task',
-          reason: 'TickTick completion (rollover)',
+          source: 'ticktick',
+          reason: `Task "${ctx.title}"`,
           metadata: JSON.stringify(meta),
           related_task_id: ctx.id,
         })
@@ -569,6 +641,14 @@ export async function runOnce(): Promise<SyncNowResult> {
           seriesKey: null,
         }
         pushRecent(rc)
+
+        if (process.env.SYNC_TRACE === '1') {
+          console.info(
+            '[sync] wrote txn amount=%d for task=%s',
+            breakdown.pointsPrePenalty,
+            ctx.id,
+          )
+        }
       } catch (e) {
         console.warn(
           '[sync] evaluation failed for rollover task',

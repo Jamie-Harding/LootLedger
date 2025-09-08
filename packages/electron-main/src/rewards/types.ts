@@ -14,7 +14,7 @@ export type RuleScope =
   | { kind: 'project'; value: string }
   | { kind: 'title_regex'; value: string }
   | { kind: 'weekday'; value: number } // 0-6, Sunday=0
-  | { kind: 'time_range'; value: { start: string; end: string } } // "HH:MM" 24h; wrap allowed
+  | { kind: 'time_range'; value: { startHour: number; endHour: number } } // 0-23; wrap allowed
   | { kind: 'deadline'; value: DeadlineValue }
 
 export interface RuleDTO {
@@ -23,6 +23,7 @@ export interface RuleDTO {
   mode: RuleMode
   scope: RuleScope
   amount: number
+  priority: number
 }
 
 // Minimal task context the evaluator needs for M4 (M5/M6 add penalty/override inputs)

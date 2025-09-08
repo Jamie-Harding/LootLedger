@@ -15,23 +15,7 @@ declare global {
 
 type AuthStatus = 'signed_in' | 'signed_out' | 'error'
 
-type RuleDTO = {
-  id: string
-  enabled: boolean
-  mode: 'exclusive' | 'additive' | 'multiplier'
-  scope:
-    | { kind: 'tag'; value: string }
-    | { kind: 'list'; value: string }
-    | { kind: 'project'; value: string }
-    | { kind: 'title_regex'; value: string }
-    | { kind: 'weekday'; value: number }
-    | { kind: 'time_range'; value: { start: string; end: string } }
-    | { kind: 'deadline'; value: DeadlineValue }
-
-  amount: number
-}
-
-type DeadlineValue = 'has_deadline' | 'overdue' | { withinHours: number }
+type RuleDTO = import('../../electron-main/src/rewards/types').RuleDTO
 
 type CompletionRow = {
   task_id: string
@@ -77,7 +61,7 @@ function formatRuleScope(scope: RuleDTO['scope']): string {
       ]
       return `weekday: ${dayNames[scope.value] || scope.value}`
     case 'time_range':
-      return `time: ${scope.value.start}-${scope.value.end}`
+      return `time: ${scope.value.startHour}-${scope.value.endHour}`
     case 'deadline':
       if (scope.value === 'has_deadline') return 'deadline: has deadline'
       if (scope.value === 'overdue') return 'deadline: overdue'
@@ -169,8 +153,13 @@ declare global {
 function RulesPanel() {
   const [rules, setRules] = React.useState<RuleDTO[] | null>(null)
   const [busy, setBusy] = React.useState(false)
-  const [quickOpen, setQuickOpen] = React.useState(false)
-  const [quickRx, setQuickRx] = React.useState('')
+  const [quickAddOpen, setQuickAddOpen] = React.useState(false)
+  const [quickAddTitle, setQuickAddTitle] = React.useState('')
+  const [quickAddMode, setQuickAddMode] = React.useState<
+    'exclusive' | 'additive' | 'multiplier'
+  >('additive')
+  const [quickAddAmount, setQuickAddAmount] = React.useState('')
+  const [quickAddScope, setQuickAddScope] = React.useState('')
 
   const refresh = React.useCallback(async () => {
     setRules(await window.rules.list())
@@ -217,50 +206,84 @@ function RulesPanel() {
     }
   }
 
-  // helper: call the right IPC with the right shape
-  async function createAdditiveTitleRegex(rx: string) {
-    // Prefer a native "create" if preload provides it…
-    if (typeof window.rules.create === 'function') {
-      return window.rules.create({
-        enabled: true,
-        mode: 'additive',
-        scope: { kind: 'title_regex', value: rx },
-        amount: 1,
-      })
-    }
-
-    // …otherwise fall back to an "upsert" API (old preload) by mapping fields.
-    // This matches the RuleRow/UpsertRulePayload in your preload: scope + matchValue + type + priority.
-    // We pick a high priority to append at the end; adjust later if you sort differently.
-    // @ts-expect-error – only runs when upsert exists
-    if (typeof window.rules.upsert === 'function') {
-      // @ts-expect-error - upsert method may not exist on all versions of the API
-      return window.rules.upsert({
-        id: undefined,
-        enabled: true,
-        type: 'additive',
-        scope: 'title_regex',
-        matchValue: rx,
-        amount: 1,
-        priority: Math.floor(Date.now()),
-      })
-    }
-
-    throw new Error('No rules.create or rules.upsert found on window.rules')
+  const insertTagScope = () => {
+    setQuickAddScope('{ "kind": "tag", "value": "sample" }')
   }
 
-  const addQuick = async () => {
-    const rx = quickRx.trim()
-    if (!rx) {
-      setQuickOpen(false)
+  const submitQuickAdd = async () => {
+    const title = quickAddTitle.trim()
+    const amountStr = quickAddAmount.trim()
+    const scopeStr = quickAddScope.trim()
+
+    if (!title || !amountStr || !scopeStr) {
+      alert('Please fill in all fields')
       return
     }
+
+    const amount = parseFloat(amountStr)
+    if (isNaN(amount)) {
+      alert('Amount must be a valid number')
+      return
+    }
+
+    // Validation based on mode
+    if (quickAddMode === 'multiplier' && amount <= 0) {
+      alert('Multiplier must be > 0')
+      return
+    }
+
+    let scope: RuleDTO['scope']
+    try {
+      scope = JSON.parse(scopeStr)
+    } catch {
+      alert('Invalid JSON in Scope field')
+      return
+    }
+
     setBusy(true)
     try {
-      console.log('[rules] creating quick additive, rx=', rx)
-      await createAdditiveTitleRegex(rx)
-      setQuickRx('')
-      setQuickOpen(false)
+      const maxPriority = rules
+        ? Math.max(...rules.map((r) => r.priority), 0)
+        : 0
+      const newRule: RuleDTO = {
+        id: 'rule-' + Date.now().toString(36),
+        enabled: true,
+        priority: maxPriority + 1,
+        mode: quickAddMode,
+        amount: amount,
+        scope: scope,
+      }
+
+      // Use the upsert method if available, otherwise fall back to create
+      if (
+        typeof (
+          window.rules as unknown as {
+            upsert?: (rule: RuleDTO) => Promise<{ id: number }>
+          }
+        ).upsert === 'function'
+      ) {
+        await (
+          window.rules as unknown as {
+            upsert: (rule: RuleDTO) => Promise<{ id: number }>
+          }
+        ).upsert(newRule)
+      } else if (typeof window.rules.create === 'function') {
+        await window.rules.create({
+          enabled: newRule.enabled,
+          mode: newRule.mode,
+          amount: newRule.amount,
+          scope: newRule.scope,
+          priority: newRule.priority,
+        })
+      } else {
+        throw new Error('No rules.create or rules.upsert found on window.rules')
+      }
+
+      // Reset form
+      setQuickAddTitle('')
+      setQuickAddAmount('')
+      setQuickAddScope('')
+      setQuickAddOpen(false)
       await refresh()
     } catch (err) {
       console.error('Failed to create quick rule:', err)
@@ -273,40 +296,158 @@ function RulesPanel() {
   return (
     <section style={{ border: '1px solid #ddd', borderRadius: 8, padding: 12 }}>
       <h2 style={{ marginTop: 0 }}>Rules</h2>
-      <div style={{ marginBottom: 8 }}>
-        {!quickOpen ? (
+      {/* Quick Add Section */}
+      <div
+        style={{
+          marginBottom: 16,
+          border: '1px solid #eee',
+          borderRadius: 8,
+          padding: 12,
+          backgroundColor: '#fafafa',
+        }}
+      >
+        <h3
+          style={{
+            marginTop: 0,
+            marginBottom: 12,
+            fontSize: '14px',
+            fontWeight: 'bold',
+          }}
+        >
+          Quick Add
+        </h3>
+        {!quickAddOpen ? (
           <button
-            onClick={() => setQuickOpen(true)}
+            onClick={() => setQuickAddOpen(true)}
             disabled={busy}
             style={{ padding: '6px 10px', borderRadius: 8 }}
           >
-            + Quick additive (title_regex)
+            + Quick Add Rule
           </button>
         ) : (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              autoFocus
-              placeholder="Title regex, e.g. (?i)gym"
-              value={quickRx}
-              onChange={(e) => setQuickRx(e.currentTarget.value)}
+          <div style={{ display: 'grid', gap: 8 }}>
+            <div
               style={{
-                flex: 1,
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 8,
+              }}
+            >
+              <input
+                autoFocus
+                placeholder="Title"
+                value={quickAddTitle}
+                onChange={(e) => setQuickAddTitle(e.currentTarget.value)}
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #ccc',
+                }}
+              />
+              <select
+                value={quickAddMode}
+                onChange={(e) =>
+                  setQuickAddMode(
+                    e.currentTarget.value as
+                      | 'exclusive'
+                      | 'additive'
+                      | 'multiplier',
+                  )
+                }
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #ccc',
+                }}
+              >
+                <option value="exclusive">Exclusive</option>
+                <option value="additive">Additive</option>
+                <option value="multiplier">Multiplier</option>
+              </select>
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: 8,
+              }}
+            >
+              <input
+                type="number"
+                step="any"
+                placeholder="Amount"
+                value={quickAddAmount}
+                onChange={(e) => setQuickAddAmount(e.currentTarget.value)}
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #ccc',
+                }}
+              />
+              <button
+                onClick={insertTagScope}
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: 8,
+                  border: '1px solid #ccc',
+                  backgroundColor: '#f0f0f0',
+                  fontSize: '12px',
+                }}
+              >
+                Insert tag scope
+              </button>
+            </div>
+            <textarea
+              placeholder='Scope JSON (e.g., { "kind": "tag", "value": "fitness" })'
+              value={quickAddScope}
+              onChange={(e) => setQuickAddScope(e.currentTarget.value)}
+              rows={3}
+              style={{
                 padding: '6px 8px',
                 borderRadius: 8,
                 border: '1px solid #ccc',
+                fontFamily: 'ui-monospace, monospace',
+                fontSize: '12px',
+                resize: 'vertical',
               }}
             />
-            <button onClick={addQuick} disabled={busy || !quickRx.trim()}>
-              Add
-            </button>
-            <button
-              onClick={() => {
-                setQuickOpen(false)
-                setQuickRx('')
-              }}
+            <div
+              style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}
             >
-              Cancel
-            </button>
+              <button
+                onClick={submitQuickAdd}
+                disabled={
+                  busy ||
+                  !quickAddTitle.trim() ||
+                  !quickAddAmount.trim() ||
+                  !quickAddScope.trim()
+                }
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 8,
+                  backgroundColor: '#007bff',
+                  color: 'white',
+                  border: 'none',
+                }}
+              >
+                Add Rule
+              </button>
+              <button
+                onClick={() => {
+                  setQuickAddOpen(false)
+                  setQuickAddTitle('')
+                  setQuickAddAmount('')
+                  setQuickAddScope('')
+                }}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 8,
+                  border: '1px solid #ccc',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -328,7 +469,37 @@ function RulesPanel() {
                 marginBottom: 6,
               }}
             >
-              <span style={{ width: 84, opacity: 0.8 }}>{r.mode}</span>
+              <span
+                style={{
+                  width: 84,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                <span
+                  style={{
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    fontSize: '10px',
+                    fontWeight: 'bold',
+                    backgroundColor:
+                      r.mode === 'exclusive'
+                        ? '#ff6b6b'
+                        : r.mode === 'additive'
+                          ? '#4ecdc4'
+                          : '#45b7d1',
+                    color: 'white',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {r.mode === 'exclusive'
+                    ? '[EXCLUSIVE]'
+                    : r.mode === 'additive'
+                      ? '[ADD]'
+                      : '[×]'}
+                </span>
+              </span>
               <code style={{ flex: 1, whiteSpace: 'pre-wrap' }}>
                 {formatRuleScope(r.scope)} · amt={r.amount}
               </code>
