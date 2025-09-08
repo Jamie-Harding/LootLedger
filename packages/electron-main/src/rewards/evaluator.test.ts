@@ -20,6 +20,7 @@ describe('evaluateTask', () => {
     mode: 'additive',
     scope: { kind: 'tag', value: 'test' },
     amount: 10,
+    priority: 0,
     ...overrides,
   })
 
@@ -255,7 +256,7 @@ describe('evaluateTask', () => {
           mode: 'additive',
           scope: {
             kind: 'time_range',
-            value: { start: '22:00', end: '06:00' },
+            value: { startHour: 22, endHour: 6 },
           },
           amount: 10,
         }),
@@ -277,7 +278,7 @@ describe('evaluateTask', () => {
           mode: 'additive',
           scope: {
             kind: 'time_range',
-            value: { start: '22:00', end: '06:00' },
+            value: { startHour: 22, endHour: 6 },
           },
           amount: 10,
         }),
@@ -299,7 +300,7 @@ describe('evaluateTask', () => {
           mode: 'additive',
           scope: {
             kind: 'time_range',
-            value: { start: '22:00', end: '06:00' },
+            value: { startHour: 22, endHour: 6 },
           },
           amount: 10,
         }),
@@ -319,7 +320,7 @@ describe('evaluateTask', () => {
           mode: 'additive',
           scope: {
             kind: 'time_range',
-            value: { start: '22:00', end: '06:00' },
+            value: { startHour: 22, endHour: 6 },
           },
           amount: 10,
         }),
@@ -339,7 +340,7 @@ describe('evaluateTask', () => {
           mode: 'additive',
           scope: {
             kind: 'time_range',
-            value: { start: '09:00', end: '17:00' },
+            value: { startHour: 9, endHour: 17 },
           },
           amount: 10,
         }),

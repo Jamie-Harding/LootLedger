@@ -18,15 +18,15 @@ export type Rule = {
     | { kind: 'project'; value: string }
     | { kind: 'title_regex'; value: string }
     | { kind: 'weekday'; value: number } // 0–6
-    | { kind: 'time_range'; value: { start: string; end: string } } // 'HH:MM'
+    | { kind: 'time_range'; value: { startHour: number; endHour: number } } // 0-23
     | { kind: 'deadline'; value: DeadlineValue }
   amount: number
+  priority: number
 }
 
 // --- HELPERS (NEW)
 function matchesDeadline(value: DeadlineValue, t: TaskContext): boolean {
   if (!t.dueAt) return value === 'has_deadline' ? false : false
-  const diffMs = t.dueAt - t.completedAt
   switch (typeof value) {
     case 'string':
       if (value === 'has_deadline') return !!t.dueAt
@@ -38,8 +38,10 @@ function matchesDeadline(value: DeadlineValue, t: TaskContext): boolean {
         typeof value.withinHours === 'number' &&
         Number.isFinite(value.withinHours)
       ) {
-        const windowMs = Math.abs(value.withinHours) * 3600_000
-        return Math.abs(diffMs) <= windowMs
+        // require completedAt <= dueAt and (dueAt - completedAt) <= N * 3600_000
+        const diffMs = t.dueAt - t.completedAt
+        const windowMs = value.withinHours * 3600_000
+        return diffMs >= 0 && diffMs <= windowMs
       }
       return false
   }
@@ -57,7 +59,8 @@ function matches(rule: Rule, t: TaskContext): boolean {
     case 'project':
       return t.project === s.value
     case 'title_regex': {
-      const rx = new RegExp(s.value, 'i')
+      // Support inline (?i) case-insensitive prefix
+      const rx = new RegExp(s.value)
       return rx.test(t.title)
     }
     case 'weekday': {
@@ -68,16 +71,12 @@ function matches(rule: Rule, t: TaskContext): boolean {
       // interpret time_range against completedAt local time
       const d = new Date(t.completedAt)
       const hh = d.getHours()
-      const mm = d.getMinutes()
-      const cur = hh * 60 + mm
-      const [sh, sm] = s.value.start.split(':').map(Number)
-      const [eh, em] = s.value.end.split(':').map(Number)
-      const startMin = sh * 60 + sm
-      const endMin = eh * 60 + em
-      // handle wrap-around ranges like 22:00–02:00
-      return startMin <= endMin
-        ? cur >= startMin && cur <= endMin
-        : cur >= startMin || cur <= endMin
+      const startHour = s.value.startHour
+      const endHour = s.value.endHour
+      // handle wrap-around ranges like 22→6
+      return startHour <= endHour
+        ? hh >= startHour && hh <= endHour
+        : hh >= startHour || hh <= endHour
     }
     case 'deadline': // NEW
       return matchesDeadline(s.value, t)
@@ -113,16 +112,34 @@ export function evaluateTask(
       (r) => r.mode === 'exclusive' && matches(r, t),
     )
     if (exclusives.length) {
-      // determine highest priority by tag order (stable tiebreaker)
+      // determine highest priority by tag order, then rule.priority, then stable tie-breaker
       exclusives.sort((a, b) => {
+        // First: tag priority (lower index wins)
         const atag = a.scope.kind === 'tag' ? a.scope.value : ''
         const btag = b.scope.kind === 'tag' ? b.scope.value : ''
         const ai = tagPriority.indexOf(atag)
         const bi = tagPriority.indexOf(btag)
-        if (ai === -1 && bi === -1) return 0
+
+        // If neither tag is in priority list, treat as +∞ (equal rank)
+        if (ai === -1 && bi === -1) {
+          // Second: rule.priority (ascending)
+          if (a.priority !== b.priority) return a.priority - b.priority
+          // Third: stable tie-breaker by id
+          return a.id.localeCompare(b.id)
+        }
+
+        // If only one tag is in priority list, the one in the list wins
         if (ai === -1) return 1
         if (bi === -1) return -1
-        return ai - bi
+
+        // Both tags are in priority list, compare by index
+        if (ai !== bi) return ai - bi
+
+        // Same tag priority, use rule.priority
+        if (a.priority !== b.priority) return a.priority - b.priority
+
+        // Final tie-breaker: stable by id
+        return a.id.localeCompare(b.id)
       })
       const win = exclusives[0]
       base = win.amount

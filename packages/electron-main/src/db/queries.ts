@@ -137,7 +137,7 @@ function _rowToEvaluatorRule(r: _Row): EvaluatorRule | null {
     | { kind: 'project'; value: string }
     | { kind: 'title_regex'; value: string }
     | { kind: 'weekday'; value: number }
-    | { kind: 'time_range'; value: { start: string; end: string } }
+    | { kind: 'time_range'; value: { startHour: number; endHour: number } }
     | { kind: 'deadline'; value: import('../rewards/types').DeadlineValue } // NEW
 
   switch (r.scope) {
@@ -165,14 +165,14 @@ function _rowToEvaluatorRule(r: _Row): EvaluatorRule | null {
         if (
           obj &&
           typeof obj === 'object' &&
-          typeof (obj as { start?: unknown }).start === 'string' &&
-          typeof (obj as { end?: unknown }).end === 'string'
+          typeof (obj as { startHour?: unknown }).startHour === 'number' &&
+          typeof (obj as { endHour?: unknown }).endHour === 'number'
         ) {
           scope = {
             kind: 'time_range',
             value: {
-              start: (obj as { start: string }).start,
-              end: (obj as { end: string }).end,
+              startHour: (obj as { startHour: number }).startHour,
+              endHour: (obj as { endHour: number }).endHour,
             },
           }
         } else {
@@ -224,6 +224,7 @@ function _rowToEvaluatorRule(r: _Row): EvaluatorRule | null {
     mode: r.type,
     scope,
     amount: r.amount,
+    priority: r.priority,
   }
 }
 
@@ -281,16 +282,25 @@ export function upsertRule(input: UpsertRuleInput): number {
   }
 
   if (input.scope === 'time_range') {
-    // Expect matchValue to be JSON {"start":"HH:MM","end":"HH:MM"}
+    // Expect matchValue to be JSON {"startHour":number,"endHour":number}
     try {
-      const o = JSON.parse(input.matchValue) as { start?: string; end?: string }
-      const isHHMM = (s?: string) => !!s && /^\d{2}:\d{2}$/.test(s)
-      if (!isHHMM(o.start) || !isHHMM(o.end)) {
-        throw new Error('Invalid time_range HH:MM')
+      const o = JSON.parse(input.matchValue) as {
+        startHour?: number
+        endHour?: number
+      }
+      if (
+        typeof o.startHour !== 'number' ||
+        typeof o.endHour !== 'number' ||
+        o.startHour < 0 ||
+        o.startHour > 23 ||
+        o.endHour < 0 ||
+        o.endHour > 23
+      ) {
+        throw new Error('Invalid time_range hours (0-23)')
       }
     } catch {
       throw new Error(
-        'time_range.matchValue must be JSON with {"start":"HH:MM","end":"HH:MM"}',
+        'time_range.matchValue must be JSON with {"startHour":number,"endHour":number}',
       )
     }
   }
