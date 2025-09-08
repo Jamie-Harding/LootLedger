@@ -167,7 +167,11 @@ export function evaluateTask(
   }
 
   // 5) round once at the end
-  const pointsPrePenalty = Math.round((base + additiveSum) * multiplierProduct)
+  // For exclusive rules, return exactly the exclusive amount, ignoring additives and multipliers
+  const pointsPrePenalty =
+    baseSource === 'exclusive'
+      ? Math.round(base)
+      : Math.round((base + additiveSum) * multiplierProduct)
 
   return {
     pointsPrePenalty,

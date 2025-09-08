@@ -99,6 +99,41 @@ describe('evaluateTask', () => {
       expect(result.exclusiveRuleId).toBe('work-rule')
       expect(result.pointsPrePenalty).toBe(25)
     })
+
+    it('should ignore additive and multiplier rules when exclusive rule matches', () => {
+      const task = createTask({ tags: ['urgent', 'bonus', 'double'] })
+      const rules: Rule[] = [
+        createRule({
+          id: 'urgent-rule',
+          mode: 'exclusive',
+          scope: { kind: 'tag', value: 'urgent' },
+          amount: 50,
+        }),
+        createRule({
+          id: 'bonus-rule',
+          mode: 'additive',
+          scope: { kind: 'tag', value: 'bonus' },
+          amount: 20,
+        }),
+        createRule({
+          id: 'double-rule',
+          mode: 'multiplier',
+          scope: { kind: 'tag', value: 'double' },
+          amount: 2,
+        }),
+      ]
+      const tagPriority = ['urgent']
+
+      const result = evaluateTask(task, rules, tagPriority)
+
+      expect(result.baseSource).toBe('exclusive')
+      expect(result.exclusiveRuleId).toBe('urgent-rule')
+      expect(result.pointsPrePenalty).toBe(50) // Should be exactly 50, not (50 + 20) * 2 = 140
+      expect(result.additiveRuleIds).toEqual(['bonus-rule']) // Still tracked for debugging
+      expect(result.multiplierRuleIds).toEqual(['double-rule']) // Still tracked for debugging
+      expect(result.additiveSum).toBe(20) // Still calculated for debugging
+      expect(result.multiplierProduct).toBe(2) // Still calculated for debugging
+    })
   })
 
   describe('no exclusive rules - base + additives × multipliers', () => {
