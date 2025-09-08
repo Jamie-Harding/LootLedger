@@ -286,3 +286,117 @@ This milestone connects Loot Ledger to the **TickTick Open API**, turning the **
 ✅ With M3 complete, Loot Ledger now has **real two-way mirroring of open and completed tasks** from TickTick. Recent Completions update live (including revocations), Open Tasks stay in sync, and the groundwork is laid for M4’s scoring rules.
 
 ---
+
+# Milestone 4 – Rule Engine & Tag Priority
+
+## Overview
+
+This milestone introduces **scoring logic** into Loot Ledger. When TickTick tasks sync in, they are no longer just mirrored — they are **evaluated against user-defined rules**. Rules determine how many points each completion is worth, with support for exclusives, additives, multipliers, and global tag priority. Evaluations now write spec-shaped metadata into the ledger, so completing tasks in TickTick directly impacts the balance.
+
+---
+
+## Key Additions
+
+- **Evaluator Function**
+  - `rewards/evaluator.ts`:
+    - Implements `evaluateTask(context, rules, tagPriority)`.
+    - Correct order:
+      1. Override (stubbed, wired fully in M6).
+      2. Highest-priority Exclusive base chosen (global tag order resolves conflicts).
+      3. Additives summed (can be negative).
+      4. Multipliers applied as a product.
+      5. Round final once at end.
+
+    - Scopes supported in M4:
+      `tag`, `list`, `project`, `title_regex` (with `(?i)` prefix tolerance).
+      _(Date-based scopes like weekday, time_range, and deadline are deferred to M5.)_
+    - Returns typed breakdown:
+
+      ```ts
+      {
+        pointsPrePenalty: number
+        baseSource: 'override' | 'exclusive' | 'none'
+        exclusiveRuleId?: string
+        additiveRuleIds: string[]
+        multiplierRuleIds: string[]
+        additiveSum: number
+        multiplierProduct: number
+      }
+      ```
+
+- **Sync Integration**
+  - `sync/index.ts`:
+    - Converts synced TickTick completions into `TaskContext`.
+    - Calls `evaluateTask()` with rules + global tag priority.
+    - Creates a transaction row per task with `TaskTransactionMetaV1` stored in `metadata`.
+    - Updated to use `pointsPrePenalty` instead of legacy `finalRounded`.
+
+- **Database & Queries**
+  - `db/migrations/0004_rules_and_settings.sql` / `0005_settings_normalize.sql`:
+    - Adds `rules` table and `settings` (normalized key/json).
+    - Seeds default `tag_priority` array.
+
+  - `db/queries.ts`:
+    - Adds CRUD for rules.
+    - Adds `getTagPriority()` / `setTagPriority()`.
+    - Normalizes DB rows into evaluator `Rule` shape.
+
+- **IPC Bridge**
+  - `ipc/rules.ts`: CRUD + `rules:test` endpoints. Returns `EvalBreakdown` directly. Normalizes DB scopes (e.g. `title` → `title_regex`).
+  - `preload.ts`: exposes `window.rules` API (list/create/update/remove/reorder/getTagPriority/setTagPriority/test).
+  - `ipc.ts`: wires `registerRulesIpc()` alongside sync/auth/db IPC.
+
+- **Renderer UI**
+  - `main.tsx`:
+    - **RulesPanel**: lists rules, enable/disable, delete, quick-add, reorder with ↑/↓. Inline editor planned for M11.
+    - **RuleTester**: textarea for mock TaskContext JSON → runs evaluator via IPC → shows `EvalBreakdown`.
+
+- **Typing/Lint**
+  - Shared `types.ts` defines `RuleDTO`, `TaskContext`, `EvalBreakdown`, `TaskTransactionMetaV1`.
+  - Evaluator and sync updated to import/re-export rather than redefine.
+  - All `any` removed.
+
+---
+
+## Acceptance Criteria
+
+- ✅ Two exclusives match → higher-priority tag wins.
+- ✅ No exclusive → result = sum(additives) × product(multipliers).
+- ✅ Negative additives reduce score.
+- ✅ Multipliers apply after subtotal, with one round at the end.
+- ✅ Transactions written with spec-shaped evaluation metadata.
+- ✅ Rules UI: list, enable/disable, delete, reorder.
+- ✅ Rule Tester panel in renderer shows real breakdown.
+- ⬜ Tag priority drag-order UI (backend helpers exist; front-end deferred to M11).
+- ⬜ Override logic (stub only; full in M6).
+- ⬜ Date-based scopes (`weekday`, `time_range`, `deadline`) deferred to M5.
+
+---
+
+## Files Edited
+
+- **Electron Main**
+  - `src/rewards/evaluator.ts`
+  - `src/rewards/types.ts`
+  - `src/sync/index.ts`
+  - `src/db/queries.ts`
+  - `src/ipc.ts`
+  - `src/preload.ts`
+  - `src/ipc/rules.ts`
+
+- **Renderer**
+  - `src/main.tsx` (RulesPanel + RuleTester)
+
+---
+
+## Files Added
+
+- **Electron Main**
+  - `src/rewards/types.ts` (canonical types)
+  - `src/ipc/rules.ts` (new IPC endpoints for rules CRUD + tester)
+
+---
+
+✅ With M4 complete, Loot Ledger now **evaluates TickTick completions into point transactions** using rules and tag priority. The backend evaluator and a basic Rules/Test UI are functional. Override logic, tag-priority drag UI, and all date-based scopes are deferred, but scoring logic, persistence, and test flow are working end-to-end.
+
+---
